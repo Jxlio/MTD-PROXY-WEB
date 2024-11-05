@@ -27,7 +27,7 @@ To run the proxy over HTTPS, you need a self-signed SSL certificate and key. You
 
 # Generate a self-signed certificate
 ```bash
-openssl req -new -x509 -sha256 -key server.key -out server.crt -days 365
+openssl req -x509 -newkey rsa:2048 -nodes -keyout server.key -out server.crt -days 365
 ```
 
 ### 3. Initialize the Go Project
