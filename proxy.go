@@ -20,16 +20,14 @@ func (pm *ProxyManager) switchProxy() {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
-	// Effectue un mélange des proxies pour la rotation
+	// Ignorez la vérification de santé pour le moment
 	rand.Shuffle(len(pm.proxies), func(i, j int) {
 		pm.proxies[i], pm.proxies[j] = pm.proxies[j], pm.proxies[i]
 	})
 
-	// Sélectionne le premier proxy après mélange
 	pm.currentProxy = pm.proxies[0]
 	log.Printf("Switched to new proxy: %s", pm.currentProxy)
 
-	// Mettre à jour l'URL du proxy actif dans Redis
 	pm.UpdateActiveProxy(pm.currentProxy)
 }
 
@@ -45,6 +43,8 @@ func (pm *ProxyManager) UpdateActiveProxy(currentProxy *url.URL) {
 	redisClient := redis.NewClient(&redis.Options{
 		Addr: "localhost:6379", // Adresse de Redis
 	})
+	defer redisClient.Close()
+
 	// Met à jour l'URL du proxy actif dans Redis
 	err := redisClient.Set(ctx, "active_proxy", currentProxy.String(), 0).Err()
 	if err != nil {
@@ -52,7 +52,9 @@ func (pm *ProxyManager) UpdateActiveProxy(currentProxy *url.URL) {
 	} else {
 		log.Printf("Successfully updated active proxy to %s in Redis", currentProxy.String())
 	}
-	err = redisClient.Publish(ctx, "proxy_updates", currentProxy).Err()
+
+	// Publie une mise à jour sur le canal "proxy_updates"
+	err = redisClient.Publish(ctx, "proxy_updates", currentProxy.String()).Err()
 	if err != nil {
 		log.Printf("Failed to publish proxy update: %v", err)
 	}
@@ -63,6 +65,8 @@ func (pm *ProxyManager) GetActiveProxy() (*url.URL, error) {
 	redisClient := redis.NewClient(&redis.Options{
 		Addr: "localhost:6379", // Adresse de Redis
 	})
+	defer redisClient.Close()
+
 	activeProxyStr, err := redisClient.Get(ctx, "active_proxy").Result()
 	if err != nil {
 		return nil, err
@@ -80,5 +84,3 @@ func getNewProxyURL() string {
 	// Retourner le proxy actif actuel
 	return currentProxyURL
 }
-
-

@@ -7,11 +7,37 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"strings" // Add this line to import the strings package
+	"strings"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 var ctx = context.Background()
+
+// Metrics for Prometheus monitoring
+var (
+	requestsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "requests_total",
+			Help: "Total number of requests processed by the proxy manager",
+		},
+		[]string{"status", "method"},
+	)
+	requestDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "request_duration_seconds",
+			Help:    "Histogram of request durations",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"method"},
+	)
+)
+
+func init() {
+	prometheus.MustRegister(requestsTotal, requestDuration)
+}
 
 func NewProxyManager(proxyURLs []string) *ProxyManager {
 	proxies := make([]*url.URL, len(proxyURLs))
@@ -36,9 +62,19 @@ func NewProxyManager(proxyURLs []string) *ProxyManager {
 
 // ServeHTTP dynamically proxies the request through one of the managed proxies
 func (pm *ProxyManager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	status := "200"
+
+	defer func() {
+		duration := time.Since(start).Seconds()
+		requestsTotal.WithLabelValues(status, r.Method).Inc()
+		requestDuration.WithLabelValues(r.Method).Observe(duration)
+	}()
+
 	// Obtenir l'URL du proxy actif depuis Redis
 	activeProxy, err := pm.GetActiveProxy()
 	if err != nil {
+		status = "500"
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
@@ -63,7 +99,9 @@ func (pm *ProxyManager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Proxying request to: %s", pm.GetProxy())
 	proxy.ServeHTTP(w, r)
 }
+
 func main() {
+	serverIP := getServerIPAddress()
 	// Proxy configurations
 	proxyConfigs := []struct {
 		id         string
@@ -81,14 +119,18 @@ func main() {
 	}
 	// List of proxy URLs
 	proxyURLs := []string{
-		"https://localhost:8081",
-		"https://localhost:8082",
-		"https://localhost:8083",
-		"https://localhost:8084",
+		"https://" + serverIP + ":8081",
+		"https://" + serverIP + ":8082",
+		"https://" + serverIP + ":8083",
+		"https://" + serverIP + ":8084",
 	}
 	// Initialize ProxyManager and SuspiciousRating
 	proxyManager := NewProxyManager(proxyURLs)
 	suspiciousRating := NewSuspiciousRating("localhost:6379", 20)
+
+	// Setup Prometheus metrics endpoint
+	http.Handle("/metrics", promhttp.Handler())
+
 	// Handle incoming requests
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		ip := r.RemoteAddr
@@ -105,7 +147,7 @@ func main() {
 	})
 	// Start the main server
 	server := &http.Server{
-		Addr:         ":443",           // Port d'écoute
+		Addr:         "0.0.0.0:443",    // Port d'écoute
 		Handler:      nil,              // Gestionnaire de requêtes (nil utilise http.DefaultServeMux)
 		ReadTimeout:  10 * time.Second, // Timeout pour lire la requête
 		WriteTimeout: 10 * time.Second, // Timeout pour envoyer la réponse

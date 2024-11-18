@@ -5,9 +5,11 @@ import (
 	"crypto/tls"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,8 +18,26 @@ import (
 )
 
 var redisClient *redis.Client
-
 var currentProxyURL string
+
+func getServerIPAddress() string {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		log.Fatalf("Failed to get network interfaces: %v", err)
+	}
+
+	for _, addr := range addrs {
+		// Vérifie si l'adresse est une IP valide (non loopback)
+		if ipNet, ok := addr.(*net.IPNet); ok && !ipNet.IP.IsLoopback() {
+			if ipNet.IP.To4() != nil { // Filtre uniquement les adresses IPv4
+				return ipNet.IP.String()
+			}
+		}
+	}
+
+	log.Fatalf("No valid IP address found")
+	return ""
+}
 
 // StartProxyServer starts a proxy server on the given address and forwards requests to the backendURL.
 func StartProxyServer(proxyID, address, backendURL string) {
@@ -25,6 +45,7 @@ func StartProxyServer(proxyID, address, backendURL string) {
 	if err != nil {
 		log.Fatalf("Failed to parse backend URL: %v", err)
 	}
+
 	redisClient = redis.NewClient(&redis.Options{
 		Addr: "localhost:6379", // Adresse de Redis
 	})
@@ -48,7 +69,7 @@ func StartProxyServer(proxyID, address, backendURL string) {
 			// Modify resource links
 			modifiedBody := bytes.Replace(body, []byte("src=\""), []byte("src=\""+parsedURL.Scheme+"://"+parsedURL.Host+"/"), -1)
 
-			// Injecter le script
+			// Inject script
 			modifiedBody = bytes.Replace(modifiedBody, []byte("</body>"), []byte("<script>s\n"+
 				"(function() {\n"+
 				"console.log('Script exécuté après le chargement de la page.');\n"+
@@ -63,15 +84,24 @@ func StartProxyServer(proxyID, address, backendURL string) {
 		}
 		return nil
 	}
+
 	var requestCounts = make(map[string]int)
 	var mu sync.Mutex
 	mux := http.NewServeMux()
+
+	// Route pour vérifier la santé du proxy
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("Proxy is healthy"))
+	})
+
 	activeProxy, err := redisClient.Get(ctx, "active_proxy").Result()
 	if err != nil {
 		log.Printf("Failed to get active proxy: %v", err)
 		activeProxy = "https://localhost" // Valeur par défaut
 	}
 	currentProxyURL = activeProxy // Initialisez la variable globale
+
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -83,6 +113,7 @@ func StartProxyServer(proxyID, address, backendURL string) {
 			http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
 			return
 		}
+
 		log.Printf("%s received a request", proxyID)
 
 		activeProxy, err := redisClient.Get(ctx, "active_proxy").Result()
@@ -105,7 +136,6 @@ func StartProxyServer(proxyID, address, backendURL string) {
 			http.Error(w, "Failed to read request body", http.StatusInternalServerError)
 			return
 		}
-		// Réinitialiser le corps pour l'envoi au proxy
 		r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 
 		// Préparer les données pour la détection
@@ -118,12 +148,21 @@ func StartProxyServer(proxyID, address, backendURL string) {
 			http.Error(w, "Failed to connect to detection service", http.StatusInternalServerError)
 			return
 		}
+
 		if detectionResponse["authorized"] == "MALICIOUS" {
-			http.Error(w, "Request blocked due to malicious content", http.StatusForbidden)
+			htmlContent, err := os.ReadFile("403.html")
+			if err != nil {
+				http.Error(w, "Failed to load 403 page", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(http.StatusForbidden)
+			w.Write(htmlContent)
 			return
 		}
 		proxy.ServeHTTP(w, r)
 	})
+
 	go func() {
 		pubsub := redisClient.Subscribe(ctx, "proxy_updates")
 		defer pubsub.Close()
@@ -133,9 +172,9 @@ func StartProxyServer(proxyID, address, backendURL string) {
 			currentProxyURL = msg.Payload
 		}
 	}()
-	// Configurer HTTPS avec les certificats
+
 	server := &http.Server{
-		Addr:    address,
+		Addr:    "0.0.0.0" + address,
 		Handler: mux,
 		TLSConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
@@ -143,5 +182,5 @@ func StartProxyServer(proxyID, address, backendURL string) {
 	}
 
 	log.Printf("Starting HTTPS proxy server %s on %s", proxyID, address)
-	server.ListenAndServeTLS("server.crt", "server.key") // Spécifier les certificats SSL ici
+	server.ListenAndServeTLS("server.crt", "server.key")
 }
