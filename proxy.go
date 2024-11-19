@@ -1,8 +1,11 @@
 package main
 
 import (
+	"crypto/tls"
 	"log"
+	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/go-redis/redis/v8"
 	"golang.org/x/exp/rand"
@@ -20,13 +23,15 @@ func (pm *ProxyManager) switchProxy() {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
-	// Ignorez la vérification de santé pour le moment
 	rand.Shuffle(len(pm.proxies), func(i, j int) {
 		pm.proxies[i], pm.proxies[j] = pm.proxies[j], pm.proxies[i]
 	})
 
 	pm.currentProxy = pm.proxies[0]
 	log.Printf("Switched to new proxy: %s", pm.currentProxy)
+
+	// Incrémentez la métrique pour le proxy actif
+	proxySwitchesTotal.WithLabelValues(pm.currentProxy.String()).Inc()
 
 	pm.UpdateActiveProxy(pm.currentProxy)
 }
@@ -78,6 +83,29 @@ func (pm *ProxyManager) GetActiveProxy() (*url.URL, error) {
 	}
 
 	return activeProxy, nil
+}
+
+func isProxyHealthy(proxyURL string) bool {
+	client := http.Client{
+		Timeout: 2 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // Ignore les erreurs TLS
+		},
+	}
+	resp, err := client.Get(proxyURL + "/health")
+	if err != nil {
+		log.Printf("Health check failed for proxy %s: %v", proxyURL, err)
+		return false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("Health check failed for proxy %s: status %d", proxyURL, resp.StatusCode)
+		return false
+	}
+
+	log.Printf("Proxy %s is healthy", proxyURL)
+	return true
 }
 
 func getNewProxyURL() string {

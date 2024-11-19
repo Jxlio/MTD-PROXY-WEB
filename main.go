@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"flag"
 	"log"
 	"net/http"
 	"net/http/httputil"
@@ -18,25 +19,33 @@ var ctx = context.Background()
 
 // Metrics for Prometheus monitoring
 var (
-	requestsTotal = prometheus.NewCounterVec(
+	proxyRequestsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "requests_total",
-			Help: "Total number of requests processed by the proxy manager",
+			Name: "proxy_requests_total",
+			Help: "Total number of requests handled by each proxy",
 		},
-		[]string{"status", "method"},
+		[]string{"proxy_id", "status", "method"},
 	)
-	requestDuration = prometheus.NewHistogramVec(
+	proxyRequestDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Name:    "request_duration_seconds",
-			Help:    "Histogram of request durations",
+			Name:    "proxy_request_duration_seconds",
+			Help:    "Histogram of request durations per proxy",
 			Buckets: prometheus.DefBuckets,
 		},
-		[]string{"method"},
+		[]string{"proxy_id", "method"},
 	)
+)
+var proxySwitchesTotal = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "proxy_switches_total",
+		Help: "Total number of proxy switches",
+	},
+	[]string{"proxy_id"},
 )
 
 func init() {
-	prometheus.MustRegister(requestsTotal, requestDuration)
+	prometheus.MustRegister(proxyRequestsTotal, proxyRequestDuration)
+	prometheus.MustRegister(proxySwitchesTotal)
 }
 
 func NewProxyManager(proxyURLs []string) *ProxyManager {
@@ -67,8 +76,9 @@ func (pm *ProxyManager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	defer func() {
 		duration := time.Since(start).Seconds()
-		requestsTotal.WithLabelValues(status, r.Method).Inc()
-		requestDuration.WithLabelValues(r.Method).Observe(duration)
+		proxyRequestsTotal.WithLabelValues(status, r.Method).Inc()
+		proxyRequestDuration.WithLabelValues(pm.GetProxy().String(), r.Method).Observe(duration)
+
 	}()
 
 	// Obtenir l'URL du proxy actif depuis Redis
@@ -102,6 +112,16 @@ func (pm *ProxyManager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	serverIP := getServerIPAddress()
+	headerRulesFile := flag.String("header-rules", "", "Path to the header rules YAML file")
+	flag.Parse()
+
+	// Charger les règles d'en-têtes si le fichier est spécifié
+	if *headerRulesFile != "" {
+		log.Printf("Loading header rules from %s", *headerRulesFile)
+		headerRules = loadHeaderRules(*headerRulesFile)
+	} else {
+		log.Println("No header rules specified. Header modification is disabled.")
+	}
 	// Proxy configurations
 	proxyConfigs := []struct {
 		id         string

@@ -10,15 +10,56 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
+
+	"gopkg.in/yaml.v2"
 
 	"github.com/go-redis/redis/v8"
 )
 
 var redisClient *redis.Client
 var currentProxyURL string
+var headerRules []HeaderRule
+
+func loadHeaderRules(filename string) []HeaderRule {
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		log.Fatalf("Failed to read header rules file: %v", err)
+	}
+
+	var config HeaderRulesConfig
+	err = yaml.Unmarshal(data, &config)
+	if err != nil {
+		log.Fatalf("Failed to parse header rules: %v", err)
+	}
+
+	return config.HeaderRules
+}
+
+func applyHeaderRules(resp *http.Response) {
+	for _, rule := range headerRules {
+		switch rule.Action {
+		case "add-header":
+			resp.Header.Add(rule.Header, rule.Value)
+		case "set-header":
+			resp.Header.Set(rule.Header, rule.Value)
+		case "del-header":
+			resp.Header.Del(rule.Header)
+		case "replace-header":
+			if rule.Regex != "" {
+				if value := resp.Header.Get(rule.Header); value != "" {
+					re := regexp.MustCompile(rule.Regex)
+					newValue := re.ReplaceAllString(value, rule.Replacement)
+					resp.Header.Set(rule.Header, newValue)
+				}
+			}
+		}
+	}
+}
 
 func getServerIPAddress() string {
 	addrs, err := net.InterfaceAddrs()
@@ -59,6 +100,7 @@ func StartProxyServer(proxyID, address, backendURL string) {
 	}
 
 	proxy.ModifyResponse = func(resp *http.Response) error {
+		applyHeaderRules(resp)
 		if strings.Contains(resp.Header.Get("Content-Type"), "text/html") {
 			body, err := io.ReadAll(resp.Body)
 			if err != nil {
@@ -103,13 +145,23 @@ func StartProxyServer(proxyID, address, backendURL string) {
 	currentProxyURL = activeProxy // Initialisez la variable globale
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		status := "200"
+
+		defer func() {
+			duration := time.Since(start).Seconds()
+			proxyRequestsTotal.WithLabelValues(proxyID, status, r.Method).Inc()
+			proxyRequestDuration.WithLabelValues(proxyID, r.Method).Observe(duration)
+		}()
+
 		mu.Lock()
 		defer mu.Unlock()
 
-		ip := r.RemoteAddr // ou r.Header.Get("X-Forwarded-For") si vous utilisez un proxy
+		ip := r.RemoteAddr
 		requestCounts[ip]++
 
 		if requestCounts[ip] > 500 {
+			status = "429"
 			http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
 			return
 		}
@@ -119,39 +171,41 @@ func StartProxyServer(proxyID, address, backendURL string) {
 		activeProxy, err := redisClient.Get(ctx, "active_proxy").Result()
 		if err != nil {
 			log.Printf("Failed to get active proxy: %v", err)
+			status = "500"
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 			return
 		}
 
-		// Comparer le proxy actif avec l'ID actuel
 		if "https://"+r.Host != activeProxy {
-			log.Printf("Request to proxy %s is blocked. Active proxy is %s", r.Host, activeProxy)
+			status = "302"
 			http.Redirect(w, r, activeProxy+r.RequestURI, http.StatusFound)
 			return
 		}
 
-		// Récupérer le corps de la requête
 		bodyBytes, err := io.ReadAll(r.Body)
 		if err != nil {
+			status = "500"
 			http.Error(w, "Failed to read request body", http.StatusInternalServerError)
 			return
 		}
 		r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 
-		// Préparer les données pour la détection
 		detectionData := map[string]interface{}{
 			"uri":  r.RequestURI,
 			"body": string(bodyBytes),
 		}
 		detectionResponse, err := sendToDetectionService(detectionData)
 		if err != nil {
+			status = "500"
 			http.Error(w, "Failed to connect to detection service", http.StatusInternalServerError)
 			return
 		}
 
 		if detectionResponse["authorized"] == "MALICIOUS" {
+			status = "403"
 			htmlContent, err := os.ReadFile("403.html")
 			if err != nil {
+				status = "500"
 				http.Error(w, "Failed to load 403 page", http.StatusInternalServerError)
 				return
 			}
@@ -160,6 +214,7 @@ func StartProxyServer(proxyID, address, backendURL string) {
 			w.Write(htmlContent)
 			return
 		}
+
 		proxy.ServeHTTP(w, r)
 	})
 
