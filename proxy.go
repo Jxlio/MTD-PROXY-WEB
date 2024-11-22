@@ -1,11 +1,7 @@
 package main
 
 import (
-	"crypto/tls"
-	"log"
-	"net/http"
 	"net/url"
-	"time"
 
 	"github.com/go-redis/redis/v8"
 	"golang.org/x/exp/rand"
@@ -28,7 +24,7 @@ func (pm *ProxyManager) switchProxy() {
 	})
 
 	pm.currentProxy = pm.proxies[0]
-	log.Printf("Switched to new proxy: %s", pm.currentProxy)
+	logInfo("Switched to new proxy: %s", pm.currentProxy)
 
 	// Incrémentez la métrique pour le proxy actif
 	proxySwitchesTotal.WithLabelValues(pm.currentProxy.String()).Inc()
@@ -53,15 +49,15 @@ func (pm *ProxyManager) UpdateActiveProxy(currentProxy *url.URL) {
 	// Met à jour l'URL du proxy actif dans Redis
 	err := redisClient.Set(ctx, "active_proxy", currentProxy.String(), 0).Err()
 	if err != nil {
-		log.Printf("Failed to update active proxy in Redis: %v", err)
+		logError("Failed to update active proxy in Redis: %v", err)
 	} else {
-		log.Printf("Successfully updated active proxy to %s in Redis", currentProxy.String())
+		logSuccess("Successfully updated active proxy to %s in Redis", currentProxy.String())
 	}
 
 	// Publie une mise à jour sur le canal "proxy_updates"
 	err = redisClient.Publish(ctx, "proxy_updates", currentProxy.String()).Err()
 	if err != nil {
-		log.Printf("Failed to publish proxy update: %v", err)
+		logError("Failed to publish proxy update: %v", err)
 	}
 }
 
@@ -83,29 +79,6 @@ func (pm *ProxyManager) GetActiveProxy() (*url.URL, error) {
 	}
 
 	return activeProxy, nil
-}
-
-func isProxyHealthy(proxyURL string) bool {
-	client := http.Client{
-		Timeout: 2 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // Ignore les erreurs TLS
-		},
-	}
-	resp, err := client.Get(proxyURL + "/health")
-	if err != nil {
-		log.Printf("Health check failed for proxy %s: %v", proxyURL, err)
-		return false
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		log.Printf("Health check failed for proxy %s: status %d", proxyURL, resp.StatusCode)
-		return false
-	}
-
-	log.Printf("Proxy %s is healthy", proxyURL)
-	return true
 }
 
 func getNewProxyURL() string {

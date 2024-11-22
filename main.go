@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"flag"
-	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -53,7 +52,7 @@ func NewProxyManager(proxyURLs []string) *ProxyManager {
 	for i, proxyURL := range proxyURLs {
 		url, err := url.Parse(proxyURL)
 		if err != nil {
-			log.Fatalf("Invalid proxy URL: %s", proxyURL)
+			logError("Invalid proxy URL: %s", proxyURL)
 		}
 		proxies[i] = url
 	}
@@ -76,9 +75,12 @@ func (pm *ProxyManager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	defer func() {
 		duration := time.Since(start).Seconds()
-		proxyRequestsTotal.WithLabelValues(status, r.Method).Inc()
-		proxyRequestDuration.WithLabelValues(pm.GetProxy().String(), r.Method).Observe(duration)
 
+		// Ajoute la valeur manquante pour le label proxy_id
+		proxyID := pm.GetProxy().String()
+
+		proxyRequestsTotal.WithLabelValues(proxyID, status, r.Method).Inc()
+		proxyRequestDuration.WithLabelValues(proxyID, r.Method).Observe(duration)
 	}()
 
 	// Obtenir l'URL du proxy actif depuis Redis
@@ -94,7 +96,7 @@ func (pm *ProxyManager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	activeProxyURL := pm.GetProxy()
 
 	if requestedURL.Scheme != activeProxyURL.Scheme || strings.Split(requestedURL.Host, ":")[0] != strings.Split(activeProxyURL.Host, ":")[0] {
-		log.Printf("Requested host %s does not match active proxy %s", requestedURL.Host, activeProxyURL.Host)
+		logWarning("Requested host %s does not match active proxy %s", requestedURL.Host, activeProxyURL.Host)
 		http.Redirect(w, r, activeProxyURL.String()+r.RequestURI, http.StatusTemporaryRedirect)
 		return
 	}
@@ -105,22 +107,30 @@ func (pm *ProxyManager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			InsecureSkipVerify: true, // Ignore les erreurs de certificat
 		},
 	}
-	log.Printf("Received request: %s %s", r.Method, r.URL)
-	log.Printf("Proxying request to: %s", pm.GetProxy())
+	logInfo("Received request: %s %s", r.Method, r.URL)
 	proxy.ServeHTTP(w, r)
 }
 
 func main() {
-	serverIP := getServerIPAddress()
+	ServerIPArg := flag.String("ip", "", "Define the Public IP adress of the proxys")
 	headerRulesFile := flag.String("header-rules", "", "Path to the header rules YAML file")
 	flag.Parse()
+	var serverIP string
+	if *ServerIPArg != "" {
+		logInfo("IP address %s has been manually set", *ServerIPArg)
+		serverIP = *ServerIPArg
+	} else {
+
+		serverIP = getServerIPAddress()
+		logWarning("No IP address specified. Using %s as the server IP address", serverIP)
+	}
 
 	// Charger les règles d'en-têtes si le fichier est spécifié
 	if *headerRulesFile != "" {
-		log.Printf("Loading header rules from %s", *headerRulesFile)
+		logInfo("Loading header rules from %s", *headerRulesFile)
 		headerRules = loadHeaderRules(*headerRulesFile)
 	} else {
-		log.Println("No header rules specified. Header modification is disabled.")
+		logWarning("No header rules specified. Header modification is disabled.")
 	}
 	// Proxy configurations
 	proxyConfigs := []struct {
@@ -177,6 +187,6 @@ func main() {
 		},
 	}
 	// Serveur HTTP pour rediriger vers HTTPS
-	log.Println("Starting HTTP to HTTPS redirect server on :80")
+	logInfo("Starting HTTP to HTTPS redirect server on :80")
 	server.ListenAndServeTLS("server.crt", "server.key")
 }

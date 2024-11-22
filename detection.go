@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"log"
 	"net"
 	"net/http"
 	"time"
@@ -31,7 +30,7 @@ func (sr *SuspiciousRating) GetRating(ip string) int {
 	if err == redis.Nil {
 		return 0
 	} else if err != nil {
-		log.Printf("Error getting rating for IP %s: %v", ip, err)
+		logError("Error getting rating for IP %s: %v", ip, err)
 		return 0
 	}
 	return rating
@@ -50,7 +49,7 @@ func (sr *SuspiciousRating) startDecay() {
 func (sr *SuspiciousRating) decayRatings() {
 	keys, err := sr.client.Keys(ctx, "*").Result()
 	if err != nil {
-		log.Printf("Error getting keys for decay: %v", err)
+		logError("Error getting keys for decay: %v", err)
 		return
 	}
 	for _, key := range keys {
