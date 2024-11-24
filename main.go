@@ -96,7 +96,6 @@ func (pm *ProxyManager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	activeProxyURL := pm.GetProxy()
 
 	if requestedURL.Scheme != activeProxyURL.Scheme || strings.Split(requestedURL.Host, ":")[0] != strings.Split(activeProxyURL.Host, ":")[0] {
-		logWarning("Requested host %s does not match active proxy %s", requestedURL.Host, activeProxyURL.Host)
 		http.Redirect(w, r, activeProxyURL.String()+r.RequestURI, http.StatusTemporaryRedirect)
 		return
 	}
@@ -107,20 +106,24 @@ func (pm *ProxyManager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			InsecureSkipVerify: true, // Ignore les erreurs de certificat
 		},
 	}
-	logInfo("Received request: %s %s", r.Method, r.URL)
 	proxy.ServeHTTP(w, r)
 }
 
 func main() {
-	ServerIPArg := flag.String("ip", "", "Define the Public IP adress of the proxys")
+	ServerIPArg := flag.String("ip", "", "Define the Public IP address of the proxies")
 	headerRulesFile := flag.String("header-rules", "", "Path to the header rules YAML file")
+	verbose := flag.Bool("v", false, "Enable verbose logging to the terminal")
+	queueSystem := flag.Bool("queue-system", false, "Queue system to use (redis or kafka)")
+	enableDetection := flag.Bool("enable-detection", false, "Enable or disable the attack detection system") // Nouvel argument
 	flag.Parse()
+
 	var serverIP string
+	configureLogger(*verbose)
+
 	if *ServerIPArg != "" {
 		logInfo("IP address %s has been manually set", *ServerIPArg)
 		serverIP = *ServerIPArg
 	} else {
-
 		serverIP = getServerIPAddress()
 		logWarning("No IP address specified. Using %s as the server IP address", serverIP)
 	}
@@ -132,6 +135,17 @@ func main() {
 	} else {
 		logWarning("No header rules specified. Header modification is disabled.")
 	}
+
+	// Initialiser la queue si activée
+	if *queueSystem {
+		queue := NewQueue("localhost:6379", "proxy_requests", "proxy_group")
+		if err := ensureQueueSetup(queue); err != nil {
+			logError("Failed to setup queue: %v", err)
+		}
+		addTestMessage(queue)
+		go startConsumers(queue)
+	}
+
 	// Proxy configurations
 	proxyConfigs := []struct {
 		id         string
@@ -143,50 +157,84 @@ func main() {
 		{id: "proxy3", address: ":8083", backendURL: "http://127.0.0.1:5000"},
 		{id: "proxy4", address: ":8084", backendURL: "http://127.0.0.1:5000"},
 	}
-	// Start individual proxies
-	for _, config := range proxyConfigs {
-		go StartProxyServer(config.id, config.address, config.backendURL)
+
+	if *queueSystem {
+		queue := NewQueue("localhost:6379", "proxy_requests", "proxy_group")
+		for _, config := range proxyConfigs {
+			go StartProxyServer(config.id, config.address, config.backendURL, queue)
+		}
+	} else {
+		for _, config := range proxyConfigs {
+			go StartProxyServer(config.id, config.address, config.backendURL, nil)
+		}
 	}
-	// List of proxy URLs
+
 	proxyURLs := []string{
 		"https://" + serverIP + ":8081",
 		"https://" + serverIP + ":8082",
 		"https://" + serverIP + ":8083",
 		"https://" + serverIP + ":8084",
 	}
-	// Initialize ProxyManager and SuspiciousRating
+
 	proxyManager := NewProxyManager(proxyURLs)
-	suspiciousRating := NewSuspiciousRating("localhost:6379", 20)
+	var suspiciousRating *SuspiciousRating
+	if *enableDetection {
+		logInfo("Attack detection system enabled")
+		suspiciousRating = NewSuspiciousRating("localhost:6379", 20)
+	} else {
+		logInfo("Attack detection system disabled")
+	}
 
 	// Setup Prometheus metrics endpoint
 	http.Handle("/metrics", promhttp.Handler())
 
 	// Handle incoming requests
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		ip := r.RemoteAddr
-		if suspiciousRating.DetectAttack(r) {
-			suspiciousRating.UpdateRating(ip, 5)
+		if *enableDetection && suspiciousRating != nil {
+			ip := r.RemoteAddr
+			if suspiciousRating.DetectAttack(r) {
+				suspiciousRating.UpdateRating(ip, 5)
+			}
+			rating := suspiciousRating.GetRating(ip)
+			if rating > suspiciousRating.maxSuspicion {
+				http.Error(w, "Forbidden", http.StatusForbidden)
+				return
+			}
+			suspiciousRating.UpdateRating(ip, 1)
 		}
-		rating := suspiciousRating.GetRating(ip)
-		if rating > suspiciousRating.maxSuspicion {
-			http.Error(w, "Forbidden", http.StatusForbidden)
-			return
-		}
-		suspiciousRating.UpdateRating(ip, 1)
+		logRequest(r)
 		proxyManager.ServeHTTP(w, r)
 	})
-	// Start the main server
+
 	server := &http.Server{
-		Addr:         "0.0.0.0:443",    // Port d'écoute
-		Handler:      nil,              // Gestionnaire de requêtes (nil utilise http.DefaultServeMux)
-		ReadTimeout:  10 * time.Second, // Timeout pour lire la requête
-		WriteTimeout: 10 * time.Second, // Timeout pour envoyer la réponse
-		IdleTimeout:  60 * time.Second, // Timeout pour les connexions inactives
+		Addr:         "0.0.0.0:443",
+		Handler:      nil,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		IdleTimeout:  60 * time.Second,
 		TLSConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
 		},
 	}
-	// Serveur HTTP pour rediriger vers HTTPS
+
 	logInfo("Starting HTTP to HTTPS redirect server on :80")
 	server.ListenAndServeTLS("server.crt", "server.key")
+}
+
+func startConsumers(queue *Queue) {
+	for {
+		messages, err := queue.ConsumeFromQueue("consumer1", 10, 5*time.Second)
+		if err != nil {
+			continue
+		}
+		for _, message := range messages {
+			// Traitez le message ici
+			logInfo("Processing message: %v", message.Values)
+			// Accuser réception du message
+			err := queue.AckMessage(message.ID)
+			if err != nil {
+				logError("Failed to acknowledge message: %v", err)
+			}
+		}
+	}
 }

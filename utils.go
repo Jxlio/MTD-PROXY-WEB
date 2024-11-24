@@ -21,11 +21,35 @@ import (
 	"github.com/go-redis/redis/v8"
 )
 
-var redisClient *redis.Client
-var currentProxyURL string
-var headerRules []HeaderRule
+var (
+	redisClient     *redis.Client
+	currentProxyURL string
+	headerRules     []HeaderRule
+	logFile         *os.File
+	requestLogFile  *os.File
+)
+
+func configureLogger(verbose bool) {
+	var err error
+	logFile, err = os.OpenFile("proxy.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Fatalf("Failed to open log file: %v", err)
+	}
+
+	if verbose {
+		log.SetOutput(io.MultiWriter(os.Stdout, logFile))
+	} else {
+		log.SetOutput(logFile)
+	}
+
+	requestLogFile, err = os.OpenFile("requests.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Fatalf("Failed to open request log file: %v", err)
+	}
+}
 
 func logInfo(format string, v ...interface{}) {
+
 	log.Printf(ColorBlue+"INFO: "+format+ColorReset, v...)
 }
 
@@ -41,6 +65,12 @@ func logSuccess(format string, v ...interface{}) {
 	log.Printf(ColorGreen+"SUCCESS: "+format+ColorReset, v...)
 }
 
+func logRequest(r *http.Request) {
+	log.SetOutput(requestLogFile)
+	log.Printf("Request: %s %s from %s", r.Method, r.URL.String(), r.RemoteAddr)
+	log.SetOutput(logFile) // Reset to main log file
+}
+
 const (
 	ColorReset  = "\033[0m"
 	ColorRed    = "\033[31m"
@@ -48,6 +78,20 @@ const (
 	ColorYellow = "\033[33m"
 	ColorBlue   = "\033[34m"
 )
+
+func init() {
+	var err error
+	logFile, err = os.OpenFile("proxy.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Fatalf("Failed to open log file: %v", err)
+	}
+	log.SetOutput(logFile)
+
+	requestLogFile, err = os.OpenFile("requests.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Fatalf("Failed to open request log file: %v", err)
+	}
+}
 
 func gzipMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -139,22 +183,54 @@ func getServerIPAddress() string {
 }
 
 // StartProxyServer starts a proxy server on the given address and forwards requests to the backendURL.
-func StartProxyServer(proxyID, address, backendURL string) {
+func StartProxyServer(proxyID, address, backendURL string, queue *Queue) {
 	parsedURL, err := url.Parse(backendURL)
 	if err != nil {
 		log.Fatalf("Failed to parse backend URL: %v", err)
 	}
 
 	redisClient = redis.NewClient(&redis.Options{
-		Addr: "localhost:6379", // Adresse de Redis
+		Addr: "localhost:6379",
 	})
 
 	proxy := httputil.NewSingleHostReverseProxy(parsedURL)
-
 	originalDirector := proxy.Director
-	proxy.Director = func(req *http.Request) {
-		originalDirector(req)
-		req.Header.Add("X-Proxy-ID", proxyID)
+	if queue == nil {
+		proxy.Director = originalDirector
+	} else {
+		// Modification du director pour inclure la logique de queue
+		proxy.Director = func(req *http.Request) {
+			originalDirector(req)
+			req.Header.Add("X-Proxy-ID", proxyID)
+
+			// Consommer un message de la queue
+			messages, err := queue.client.XReadGroup(ctx, &redis.XReadGroupArgs{
+				Group:    "proxy_group",
+				Consumer: "proxy_consumer",
+				Streams:  []string{"proxy_requests", ">"},
+				Count:    1,
+				Block:    10 * time.Millisecond, // Attendre jusqu'à 5 secondes
+			}).Result()
+
+			if err != nil {
+				return
+			}
+
+			for _, msg := range messages[0].Messages {
+				if msg.Values["block"] == "true" {
+					req.URL.Host = "" // Bloquer la requête
+					logInfo("Blocked request based on queue message")
+				}
+				if newURL, ok := msg.Values["redirect_url"].(string); ok {
+					// Rediriger la requête à une autre URL
+					parsedNewURL, _ := url.Parse(newURL)
+					req.URL.Scheme = parsedNewURL.Scheme
+					req.URL.Host = parsedNewURL.Host
+					req.URL.Path = parsedNewURL.Path
+					logInfo("Redirected request to new URL: %s", newURL)
+				}
+			}
+		}
 	}
 
 	proxy.ModifyResponse = func(resp *http.Response) error {
@@ -195,6 +271,7 @@ func StartProxyServer(proxyID, address, backendURL string) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("Proxy is healthy"))
 	})
+
 	handlerWithMiddleware := gzipMiddleware(mux)
 	activeProxy, err := redisClient.Get(ctx, "active_proxy").Result()
 	if err != nil {
@@ -212,7 +289,7 @@ func StartProxyServer(proxyID, address, backendURL string) {
 			proxyRequestsTotal.WithLabelValues(proxyID, status, r.Method).Inc()
 			proxyRequestDuration.WithLabelValues(proxyID, r.Method).Observe(duration)
 		}()
-
+		logRequest(r)
 		mu.Lock()
 		defer mu.Unlock()
 
