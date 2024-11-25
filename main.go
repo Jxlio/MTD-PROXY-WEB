@@ -15,6 +15,7 @@ import (
 )
 
 var ctx = context.Background()
+var unsecureCert bool
 
 // Metrics for Prometheus monitoring
 var (
@@ -96,11 +97,8 @@ func (pm *ProxyManager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	proxy := httputil.NewSingleHostReverseProxy(activeProxy)
-	proxy.Transport = &http.Transport{
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true,
-		},
-	}
+	EnableSkipSecureVerify(proxy)
+
 	proxy.ServeHTTP(w, r)
 }
 
@@ -109,7 +107,8 @@ func main() {
 	headerRulesFile := flag.String("header-rules", "", "Path to the header rules YAML file")
 	verbose := flag.Bool("v", false, "Enable verbose logging to the terminal")
 	queueSystem := flag.Bool("queue-system", false, "Queue system to use (redis or kafka)")
-	enableDetection := flag.Bool("enable-detection", false, "Enable or disable the attack detection system") // Nouvel argument
+	enableDetection := flag.Bool("enable-detection", false, "Enable or disable the attack detection system")
+	unsecureCertVerification := flag.Bool("unsecure-cert", false, "Enable skipping unsecure certifate verification")
 	flag.Parse()
 
 	var serverIP string
@@ -137,6 +136,13 @@ func main() {
 		}
 		addTestMessage(queue)
 		go startConsumers(queue)
+	}
+
+	if *unsecureCertVerification {
+		unsecureCert = true
+		logWarning("Secure certificate verification is disabled.")
+	} else {
+		unsecureCert = false
 	}
 
 	// Proxy configurations
