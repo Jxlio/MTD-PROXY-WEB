@@ -145,11 +145,18 @@ func StartProxyServer(proxyID, address, backendURL string, queue *Queue, enableD
 	proxy.ModifyResponse = func(resp *http.Response) error {
 		applyHeaderRules(resp)
 
+		// Vérifiez si la réponse est déjà compressée
+		if strings.Contains(resp.Header.Get("Content-Encoding"), "gzip") {
+			logInfo("Skipping Gzip compression; response already compressed")
+			return nil
+		}
+
+		// Appliquez gzip uniquement si le client le supporte
 		if strings.Contains(resp.Request.Header.Get("Accept-Encoding"), "gzip") {
-			logInfo("Applying Gzip compression to response for URL: %s", resp.Request.URL)
+			logInfo("Applying Gzip compression from ModifyResponse to response for URL: %s", resp.Request.URL)
 
 			resp.Header.Set("Content-Encoding", "gzip")
-			resp.Header.Del("Content-Length")
+			resp.Header.Del("Content-Length") // Supprimez Content-Length pour éviter les incohérences
 
 			var buf bytes.Buffer
 			gz := gzip.NewWriter(&buf)
@@ -180,7 +187,6 @@ func StartProxyServer(proxyID, address, backendURL string, queue *Queue, enableD
 		w.Write([]byte("Proxy is healthy"))
 	})
 
-	handlerWithMiddleware := gzipMiddleware(mux)
 	activeProxy, err := redisClient.Get(ctx, "active_proxy").Result()
 	if err != nil {
 		logError("Failed to get active proxy: %v", err)
@@ -277,7 +283,7 @@ func StartProxyServer(proxyID, address, backendURL string, queue *Queue, enableD
 
 	server := &http.Server{
 		Addr:    "0.0.0.0" + address,
-		Handler: handlerWithMiddleware,
+		Handler: mux,
 		TLSConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
 		},

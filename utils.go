@@ -1,7 +1,6 @@
 package main
 
 import (
-	"compress/gzip"
 	"crypto/tls"
 	"io"
 	"log"
@@ -10,7 +9,6 @@ import (
 	"net/http/httputil"
 	"os"
 	"regexp"
-	"strings"
 
 	"gopkg.in/yaml.v2"
 
@@ -63,7 +61,7 @@ func logSuccess(format string, v ...interface{}) {
 
 func logRequest(r *http.Request) {
 	log.SetOutput(requestLogFile)
-	log.Printf("Request: %s %s from %s", r.Method, r.URL.String(), r.RemoteAddr)
+	log.Printf("Request: %s %s from %s; %s; %s", r.Method, r.URL.String(), r.RemoteAddr, r.UserAgent(), r.Header)
 	log.SetOutput(logFile)
 }
 
@@ -87,30 +85,6 @@ func init() {
 	if err != nil {
 		log.Fatalf("Failed to open request log file: %v", err)
 	}
-}
-
-func gzipMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
-			next.ServeHTTP(w, r)
-			return
-		}
-		w.Header().Set("Content-Encoding", "gzip")
-		gz := gzip.NewWriter(w)
-		defer gz.Close()
-
-		gzw := gzipResponseWriter{ResponseWriter: w, Writer: gz}
-		next.ServeHTTP(gzw, r)
-	})
-}
-
-type gzipResponseWriter struct {
-	http.ResponseWriter
-	Writer *gzip.Writer
-}
-
-func (gzw gzipResponseWriter) Write(data []byte) (int, error) {
-	return gzw.Writer.Write(data)
 }
 
 func loadHeaderRules(filename string) []HeaderRule {

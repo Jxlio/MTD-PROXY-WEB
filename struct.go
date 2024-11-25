@@ -1,6 +1,8 @@
 package main
 
 import (
+	"compress/gzip"
+	"net/http"
 	"net/url"
 	"sync"
 	"time"
@@ -18,6 +20,11 @@ type ProxyManager struct {
 type SuspiciousRating struct {
 	client       *redis.Client
 	maxSuspicion int
+}
+
+type gzipResponseWriter struct {
+	http.ResponseWriter
+	Writer *gzip.Writer
 }
 
 type HeaderRule struct {
