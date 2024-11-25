@@ -1,5 +1,6 @@
-# MTD Proxy
-This project implements a secure reverse proxy in Go, featuring MTDS mechanisms and anti DDoS protection at low cost.
+# Morph Proxy
+
+
 
 ## Features
 
