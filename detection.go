@@ -68,33 +68,28 @@ func (sr *SuspiciousRating) DetectAttack(r *http.Request) bool {
 }
 
 func sendToDetectionService(data map[string]interface{}) (map[string]string, error) {
-	// Convertir les données en JSON
 	jsonData, err := json.Marshal(data)
 	if err != nil {
 		return nil, err
 	}
 
-	// Établir une connexion TCP
 	conn, err := net.Dial("tcp", "localhost:3000")
 	if err != nil {
 		return nil, err
 	}
 	defer conn.Close()
 
-	// Envoyer les données encodées en UTF-8 sur la connexion TCP
 	_, err = conn.Write([]byte(jsonData))
 	if err != nil {
 		return nil, err
 	}
 
-	// Lire la réponse du serveur
 	buffer := make([]byte, 1024)
 	n, err := conn.Read(buffer)
 	if err != nil {
 		return nil, err
 	}
 
-	// Décoder la réponse reçue (supposons qu'elle soit en JSON)
 	var response map[string]string
 	err = json.Unmarshal(buffer[:n], &response)
 	if err != nil {

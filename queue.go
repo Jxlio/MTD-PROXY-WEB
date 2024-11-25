@@ -62,13 +62,11 @@ func (q *Queue) AckMessage(id string) error {
 func ensureQueueSetup(queue *Queue) error {
 	ctx := context.Background()
 
-	// Créer le groupe si nécessaire
 	err := queue.client.XGroupCreateMkStream(ctx, "proxy_requests", "proxy_group", "$").Err()
 	if err != nil && err.Error() != "BUSYGROUP Consumer Group name already exists" {
 		return fmt.Errorf("failed to create group: %v", err)
 	}
 
-	// Vérifier si le stream contient des messages
 	count, err := queue.client.XLen(ctx, "proxy_requests").Result()
 	if err != nil {
 		return fmt.Errorf("failed to check stream length: %v", err)

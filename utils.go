@@ -27,6 +27,7 @@ var (
 	headerRules     []HeaderRule
 	logFile         *os.File
 	requestLogFile  *os.File
+	enableDetection bool
 )
 
 func configureLogger(verbose bool) {
@@ -68,7 +69,7 @@ func logSuccess(format string, v ...interface{}) {
 func logRequest(r *http.Request) {
 	log.SetOutput(requestLogFile)
 	log.Printf("Request: %s %s from %s", r.Method, r.URL.String(), r.RemoteAddr)
-	log.SetOutput(logFile) // Reset to main log file
+	log.SetOutput(logFile)
 }
 
 const (
@@ -96,12 +97,9 @@ func init() {
 func gzipMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
-			// Si le client ne supporte pas gzip, continuer sans compression
 			next.ServeHTTP(w, r)
 			return
 		}
-
-		// Intercepter la réponse pour la compresser
 		w.Header().Set("Content-Encoding", "gzip")
 		gz := gzip.NewWriter(w)
 		defer gz.Close()
@@ -111,13 +109,11 @@ func gzipMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// gzipResponseWriter pour intercepter les réponses
 type gzipResponseWriter struct {
 	http.ResponseWriter
 	Writer *gzip.Writer
 }
 
-// Redéfinir Write pour compresser les données
 func (gzw gzipResponseWriter) Write(data []byte) (int, error) {
 	return gzw.Writer.Write(data)
 }
@@ -183,7 +179,7 @@ func getServerIPAddress() string {
 }
 
 // StartProxyServer starts a proxy server on the given address and forwards requests to the backendURL.
-func StartProxyServer(proxyID, address, backendURL string, queue *Queue) {
+func StartProxyServer(proxyID, address, backendURL string, queue *Queue, enableDetection bool) {
 	parsedURL, err := url.Parse(backendURL)
 	if err != nil {
 		log.Fatalf("Failed to parse backend URL: %v", err)
@@ -198,18 +194,16 @@ func StartProxyServer(proxyID, address, backendURL string, queue *Queue) {
 	if queue == nil {
 		proxy.Director = originalDirector
 	} else {
-		// Modification du director pour inclure la logique de queue
 		proxy.Director = func(req *http.Request) {
 			originalDirector(req)
 			req.Header.Add("X-Proxy-ID", proxyID)
 
-			// Consommer un message de la queue
 			messages, err := queue.client.XReadGroup(ctx, &redis.XReadGroupArgs{
 				Group:    "proxy_group",
 				Consumer: "proxy_consumer",
 				Streams:  []string{"proxy_requests", ">"},
 				Count:    1,
-				Block:    10 * time.Millisecond, // Attendre jusqu'à 5 secondes
+				Block:    10 * time.Millisecond,
 			}).Result()
 
 			if err != nil {
@@ -218,11 +212,10 @@ func StartProxyServer(proxyID, address, backendURL string, queue *Queue) {
 
 			for _, msg := range messages[0].Messages {
 				if msg.Values["block"] == "true" {
-					req.URL.Host = "" // Bloquer la requête
+					req.URL.Host = ""
 					logInfo("Blocked request based on queue message")
 				}
 				if newURL, ok := msg.Values["redirect_url"].(string); ok {
-					// Rediriger la requête à une autre URL
 					parsedNewURL, _ := url.Parse(newURL)
 					req.URL.Scheme = parsedNewURL.Scheme
 					req.URL.Host = parsedNewURL.Host
@@ -266,7 +259,6 @@ func StartProxyServer(proxyID, address, backendURL string, queue *Queue) {
 	var mu sync.Mutex
 	mux := http.NewServeMux()
 
-	// Route pour vérifier la santé du proxy
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("Proxy is healthy"))
@@ -276,9 +268,9 @@ func StartProxyServer(proxyID, address, backendURL string, queue *Queue) {
 	activeProxy, err := redisClient.Get(ctx, "active_proxy").Result()
 	if err != nil {
 		logError("Failed to get active proxy: %v", err)
-		activeProxy = "https://localhost" // Valeur par défaut
+		activeProxy = "https://localhost"
 	}
-	currentProxyURL = activeProxy // Initialisez la variable globale
+	currentProxyURL = activeProxy
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -326,29 +318,32 @@ func StartProxyServer(proxyID, address, backendURL string, queue *Queue) {
 		}
 		r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 
-		detectionData := map[string]interface{}{
-			"uri":  r.RequestURI,
-			"body": string(bodyBytes),
-		}
-		detectionResponse, err := sendToDetectionService(detectionData)
-		if err != nil {
-			status = "500"
-			http.Error(w, "Failed to connect to detection service", http.StatusInternalServerError)
-			return
-		}
-
-		if detectionResponse["authorized"] == "MALICIOUS" {
-			status = "403"
-			htmlContent, err := os.ReadFile("403.html")
+		if enableDetection {
+			// Appel au service de détection si activé
+			detectionData := map[string]interface{}{
+				"uri":  r.RequestURI,
+				"body": string(bodyBytes),
+			}
+			detectionResponse, err := sendToDetectionService(detectionData)
 			if err != nil {
 				status = "500"
-				http.Error(w, "Failed to load 403 page", http.StatusInternalServerError)
+				http.Error(w, "Failed to connect to detection service", http.StatusInternalServerError)
 				return
 			}
-			w.Header().Set("Content-Type", "text/html")
-			w.WriteHeader(http.StatusForbidden)
-			w.Write(htmlContent)
-			return
+
+			if detectionResponse["authorized"] == "MALICIOUS" {
+				status = "403"
+				htmlContent, err := os.ReadFile("403.html")
+				if err != nil {
+					status = "500"
+					http.Error(w, "Failed to load 403 page", http.StatusInternalServerError)
+					return
+				}
+				w.Header().Set("Content-Type", "text/html")
+				w.WriteHeader(http.StatusForbidden)
+				w.Write(htmlContent)
+				return
+			}
 		}
 
 		proxy.ServeHTTP(w, r)

@@ -59,11 +59,11 @@ func NewProxyManager(proxyURLs []string) *ProxyManager {
 
 	pm := &ProxyManager{
 		proxies:      proxies,
-		currentProxy: proxies[0],                       // Commence avec le premier proxy
-		ticker:       time.NewTicker(10 * time.Second), // Change toutes les 10 secondes
+		currentProxy: proxies[0],
+		ticker:       time.NewTicker(10 * time.Second),
 	}
 
-	go pm.startAutoSwitch() // Démarre le changement automatique de proxy
+	go pm.startAutoSwitch()
 
 	return pm
 }
@@ -75,15 +75,12 @@ func (pm *ProxyManager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	defer func() {
 		duration := time.Since(start).Seconds()
-
-		// Ajoute la valeur manquante pour le label proxy_id
 		proxyID := pm.GetProxy().String()
 
 		proxyRequestsTotal.WithLabelValues(proxyID, status, r.Method).Inc()
 		proxyRequestDuration.WithLabelValues(proxyID, r.Method).Observe(duration)
 	}()
 
-	// Obtenir l'URL du proxy actif depuis Redis
 	activeProxy, err := pm.GetActiveProxy()
 	if err != nil {
 		status = "500"
@@ -91,7 +88,6 @@ func (pm *ProxyManager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Vérifie si l'URL demandée correspond à l'URL du proxy actif
 	requestedURL := r.URL
 	activeProxyURL := pm.GetProxy()
 
@@ -99,11 +95,10 @@ func (pm *ProxyManager) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, activeProxyURL.String()+r.RequestURI, http.StatusTemporaryRedirect)
 		return
 	}
-	// Proxy la requête au proxy courant
 	proxy := httputil.NewSingleHostReverseProxy(activeProxy)
 	proxy.Transport = &http.Transport{
 		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true, // Ignore les erreurs de certificat
+			InsecureSkipVerify: true,
 		},
 	}
 	proxy.ServeHTTP(w, r)
@@ -128,7 +123,6 @@ func main() {
 		logWarning("No IP address specified. Using %s as the server IP address", serverIP)
 	}
 
-	// Charger les règles d'en-têtes si le fichier est spécifié
 	if *headerRulesFile != "" {
 		logInfo("Loading header rules from %s", *headerRulesFile)
 		headerRules = loadHeaderRules(*headerRulesFile)
@@ -136,7 +130,6 @@ func main() {
 		logWarning("No header rules specified. Header modification is disabled.")
 	}
 
-	// Initialiser la queue si activée
 	if *queueSystem {
 		queue := NewQueue("localhost:6379", "proxy_requests", "proxy_group")
 		if err := ensureQueueSetup(queue); err != nil {
@@ -161,14 +154,13 @@ func main() {
 	if *queueSystem {
 		queue := NewQueue("localhost:6379", "proxy_requests", "proxy_group")
 		for _, config := range proxyConfigs {
-			go StartProxyServer(config.id, config.address, config.backendURL, queue)
+			go StartProxyServer(config.id, config.address, config.backendURL, queue, *enableDetection)
 		}
 	} else {
 		for _, config := range proxyConfigs {
-			go StartProxyServer(config.id, config.address, config.backendURL, nil)
+			go StartProxyServer(config.id, config.address, config.backendURL, nil, *enableDetection)
 		}
 	}
-
 	proxyURLs := []string{
 		"https://" + serverIP + ":8081",
 		"https://" + serverIP + ":8082",
@@ -228,9 +220,7 @@ func startConsumers(queue *Queue) {
 			continue
 		}
 		for _, message := range messages {
-			// Traitez le message ici
 			logInfo("Processing message: %v", message.Values)
-			// Accuser réception du message
 			err := queue.AckMessage(message.ID)
 			if err != nil {
 				logError("Failed to acknowledge message: %v", err)

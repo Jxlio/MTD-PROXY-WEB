@@ -26,7 +26,6 @@ func (pm *ProxyManager) switchProxy() {
 	pm.currentProxy = pm.proxies[0]
 	logInfo("Switched to new proxy: %s", pm.currentProxy)
 
-	// Incrémentez la métrique pour le proxy actif
 	proxySwitchesTotal.WithLabelValues(pm.currentProxy.String()).Inc()
 
 	pm.UpdateActiveProxy(pm.currentProxy)
@@ -42,11 +41,10 @@ func (pm *ProxyManager) GetProxy() *url.URL {
 // UpdateActiveProxy updates the active proxy in Redis
 func (pm *ProxyManager) UpdateActiveProxy(currentProxy *url.URL) {
 	redisClient := redis.NewClient(&redis.Options{
-		Addr: "localhost:6379", // Adresse de Redis
+		Addr: "localhost:6379",
 	})
 	defer redisClient.Close()
 
-	// Met à jour l'URL du proxy actif dans Redis
 	err := redisClient.Set(ctx, "active_proxy", currentProxy.String(), 0).Err()
 	if err != nil {
 		logError("Failed to update active proxy in Redis: %v", err)
@@ -54,7 +52,6 @@ func (pm *ProxyManager) UpdateActiveProxy(currentProxy *url.URL) {
 		logSuccess("Successfully updated active proxy to %s in Redis", currentProxy.String())
 	}
 
-	// Publie une mise à jour sur le canal "proxy_updates"
 	err = redisClient.Publish(ctx, "proxy_updates", currentProxy.String()).Err()
 	if err != nil {
 		logError("Failed to publish proxy update: %v", err)
@@ -64,7 +61,7 @@ func (pm *ProxyManager) UpdateActiveProxy(currentProxy *url.URL) {
 // GetActiveProxy retrieves the currently active proxy from Redis
 func (pm *ProxyManager) GetActiveProxy() (*url.URL, error) {
 	redisClient := redis.NewClient(&redis.Options{
-		Addr: "localhost:6379", // Adresse de Redis
+		Addr: "localhost:6379",
 	})
 	defer redisClient.Close()
 
@@ -82,6 +79,5 @@ func (pm *ProxyManager) GetActiveProxy() (*url.URL, error) {
 }
 
 func getNewProxyURL() string {
-	// Retourner le proxy actif actuel
 	return currentProxyURL
 }
