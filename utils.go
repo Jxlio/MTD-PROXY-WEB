@@ -16,11 +16,12 @@ import (
 )
 
 var (
-	redisClient     *redis.Client
-	currentProxyURL string
-	headerRules     []HeaderRule
-	logFile         *os.File
-	requestLogFile  *os.File
+	redisClient      *redis.Client
+	currentProxyURL  string
+	headerRules      []HeaderRule
+	logFile          *os.File
+	requestLogFile   *os.File
+	backendURLserver string
 )
 
 func configureLogger(verbose bool) {

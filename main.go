@@ -112,6 +112,7 @@ func main() {
 	unsecureCertVerification := flag.Bool("unsecure-cert", false, "Enable skipping unsecure certifate verification")
 	proxyCount := flag.Int("proxy-count", 4, "Number of proxies to deploy in rotation")
 	proxyPorts := flag.String("proxy-ports", "8081,8082,8083,8084", "Comma-separated list of ports for proxies")
+	BackendURLFlag := flag.String("web-server", "http://127.0.0.1:5000", "Define the backend web server URL")
 	flag.Parse()
 
 	var serverIP string
@@ -140,7 +141,11 @@ func main() {
 		addTestMessage(queue)
 		go startConsumers(queue)
 	}
-
+	if *BackendURLFlag != "" {
+		backendURLserver = *BackendURLFlag
+	} else {
+		backendURLserver = "http://127.0.0.1:5000"
+	}
 	if *unsecureCertVerification {
 		unsecureCert = true
 		logWarning("Secure certificate verification is disabled.")
@@ -169,7 +174,7 @@ func main() {
 		}{
 			id:         fmt.Sprintf("proxy%d", i+1),
 			address:    ":" + port,
-			backendURL: "http://127.0.0.1:5000",
+			backendURL: backendURLserver,
 		})
 	}
 
@@ -229,7 +234,7 @@ func main() {
 		},
 	}
 
-	logInfo("Starting HTTP to HTTPS redirect server on :80")
+	logInfo("Starting HTTP to HTTPS redirect server")
 	server.ListenAndServeTLS("server.crt", "server.key")
 }
 
