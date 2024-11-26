@@ -61,7 +61,7 @@ func logSuccess(format string, v ...interface{}) {
 
 func logRequest(r *http.Request) {
 	log.SetOutput(requestLogFile)
-	log.Printf("Request: %s %s from %s; %s; %s", r.Method, r.URL.String(), r.RemoteAddr, r.UserAgent(), r.Header)
+	log.Printf("Request: %s %s from %s; %s", r.Method, r.URL.String(), r.RemoteAddr, r.UserAgent())
 	log.SetOutput(logFile)
 }
 

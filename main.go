@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -109,6 +110,8 @@ func main() {
 	queueSystem := flag.Bool("queue-system", false, "Queue system to use (redis or kafka)")
 	enableDetection := flag.Bool("enable-detection", false, "Enable or disable the attack detection system")
 	unsecureCertVerification := flag.Bool("unsecure-cert", false, "Enable skipping unsecure certifate verification")
+	proxyCount := flag.Int("proxy-count", 4, "Number of proxies to deploy in rotation")
+	proxyPorts := flag.String("proxy-ports", "8081,8082,8083,8084", "Comma-separated list of ports for proxies")
 	flag.Parse()
 
 	var serverIP string
@@ -145,16 +148,29 @@ func main() {
 		unsecureCert = false
 	}
 
+	portList := strings.Split(*proxyPorts, ",")
+	if len(portList) < *proxyCount {
+		logWarning("Insufficient ports provided. Using default ports.")
+		portList = []string{"8081", "8082", "8083", "8084"}
+	}
+
 	// Proxy configurations
 	proxyConfigs := []struct {
 		id         string
 		address    string
 		backendURL string
-	}{
-		{id: "proxy1", address: ":8081", backendURL: "http://127.0.0.1:5000"},
-		{id: "proxy2", address: ":8082", backendURL: "http://127.0.0.1:5000"},
-		{id: "proxy3", address: ":8083", backendURL: "http://127.0.0.1:5000"},
-		{id: "proxy4", address: ":8084", backendURL: "http://127.0.0.1:5000"},
+	}{}
+	for i := 0; i < *proxyCount; i++ {
+		port := portList[i%len(portList)]
+		proxyConfigs = append(proxyConfigs, struct {
+			id         string
+			address    string
+			backendURL string
+		}{
+			id:         fmt.Sprintf("proxy%d", i+1),
+			address:    ":" + port,
+			backendURL: "http://127.0.0.1:5000",
+		})
 	}
 
 	if *queueSystem {
@@ -167,11 +183,9 @@ func main() {
 			go StartProxyServer(config.id, config.address, config.backendURL, nil, *enableDetection)
 		}
 	}
-	proxyURLs := []string{
-		"https://" + serverIP + ":8081",
-		"https://" + serverIP + ":8082",
-		"https://" + serverIP + ":8083",
-		"https://" + serverIP + ":8084",
+	proxyURLs := []string{}
+	for _, config := range proxyConfigs {
+		proxyURLs = append(proxyURLs, "https://"+serverIP+config.address)
 	}
 
 	proxyManager := NewProxyManager(proxyURLs)
