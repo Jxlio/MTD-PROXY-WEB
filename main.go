@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/tls"
+	"encoding/hex"
 	"flag"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -17,6 +20,7 @@ import (
 
 var ctx = context.Background()
 var unsecureCert bool
+var proxyManager *ProxyManager
 
 // Metrics for Prometheus monitoring
 var (
@@ -49,6 +53,14 @@ func init() {
 	prometheus.MustRegister(proxySwitchesTotal)
 }
 
+func generateAPIKey() string {
+	key := make([]byte, 32)
+	_, err := rand.Read(key)
+	if err != nil {
+		log.Fatalf("Failed to generate API key: %v", err)
+	}
+	return hex.EncodeToString(key)
+}
 func NewProxyManager(proxyURLs []string) *ProxyManager {
 	proxies := make([]*url.URL, len(proxyURLs))
 	for i, proxyURL := range proxyURLs {
@@ -113,6 +125,7 @@ func main() {
 	proxyCount := flag.Int("proxy-count", 4, "Number of proxies to deploy in rotation")
 	proxyPorts := flag.String("proxy-ports", "8081,8082,8083,8084", "Comma-separated list of ports for proxies")
 	BackendURLFlag := flag.String("web-server", "http://127.0.0.1:5000", "Define the backend web server URL")
+	apiFlag := flag.Bool("api", false, "Define the API endpoint")
 	flag.Parse()
 
 	var serverIP string
@@ -158,7 +171,6 @@ func main() {
 		logWarning("Insufficient ports provided. Using default ports.")
 		portList = []string{"8081", "8082", "8083", "8084"}
 	}
-
 	// Proxy configurations
 	proxyConfigs := []struct {
 		id         string
@@ -178,22 +190,31 @@ func main() {
 		})
 	}
 
-	if *queueSystem {
-		queue := NewQueue("localhost:6379", "proxy_requests", "proxy_group")
-		for _, config := range proxyConfigs {
-			go StartProxyServer(config.id, config.address, config.backendURL, queue, *enableDetection)
-		}
-	} else {
-		for _, config := range proxyConfigs {
-			go StartProxyServer(config.id, config.address, config.backendURL, nil, *enableDetection)
-		}
-	}
 	proxyURLs := []string{}
 	for _, config := range proxyConfigs {
 		proxyURLs = append(proxyURLs, "https://"+serverIP+config.address)
 	}
-
 	proxyManager := NewProxyManager(proxyURLs)
+	mux := http.NewServeMux()
+	if *apiFlag {
+		logInfo("API endpoint enabled")
+		//generate an random api key
+		apiKey := generateAPIKey()
+		logInfo("API Key: %s", apiKey)
+		setupAPIRoutes(mux, proxyManager, apiKey)
+	}
+
+	if *queueSystem {
+		queue := NewQueue("localhost:6379", "proxy_requests", "proxy_group")
+		for _, config := range proxyConfigs {
+			go StartProxyServer(config.id, config.address, config.backendURL, queue, *enableDetection, proxyManager)
+		}
+	} else {
+		for _, config := range proxyConfigs {
+			go StartProxyServer(config.id, config.address, config.backendURL, nil, *enableDetection, proxyManager)
+		}
+	}
+
 	var suspiciousRating *SuspiciousRating
 	if *enableDetection {
 		logInfo("Attack detection system enabled")
@@ -203,10 +224,17 @@ func main() {
 	}
 
 	// Setup Prometheus metrics endpoint
-	http.Handle("/metrics", promhttp.Handler())
+	mux.Handle("/metrics", promhttp.Handler())
 
-	// Handle incoming requests
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			if *apiFlag {
+				mux.ServeHTTP(w, r)
+			} else {
+				http.Error(w, "API not enabled", http.StatusNotFound)
+			}
+			return
+		}
 		if *enableDetection && suspiciousRating != nil {
 			ip := r.RemoteAddr
 			if suspiciousRating.DetectAttack(r) {
@@ -220,12 +248,20 @@ func main() {
 			suspiciousRating.UpdateRating(ip, 1)
 		}
 		logRequest(r)
-		proxyManager.ServeHTTP(w, r)
+
+		proxy := proxyManager.GetProxy()
+		if proxy == nil {
+			http.Error(w, "No active proxy available", http.StatusServiceUnavailable)
+			return
+		}
+
+		targetURL := proxy.String() + r.URL.RequestURI()
+		http.Redirect(w, r, targetURL, http.StatusTemporaryRedirect)
 	})
 
 	server := &http.Server{
 		Addr:         "0.0.0.0:443",
-		Handler:      nil,
+		Handler:      mux,
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  60 * time.Second,

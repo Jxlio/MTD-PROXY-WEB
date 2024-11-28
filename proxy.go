@@ -21,7 +21,24 @@ import (
 // startAutoSwitch switches proxies automatically every 10 seconds
 func (pm *ProxyManager) startAutoSwitch() {
 	for range pm.ticker.C {
-		pm.switchProxy()
+		pm.mu.Lock()
+		if len(pm.proxies) == 0 {
+			logWarning("No proxies available for rotation")
+			pm.currentProxy = nil
+			pm.mu.Unlock()
+			continue
+		}
+
+		index := 0
+		for i, proxy := range pm.proxies {
+			if proxy.String() == pm.currentProxy.String() {
+				index = (i + 1) % len(pm.proxies)
+				break
+			}
+		}
+		pm.currentProxy = pm.proxies[index]
+		logInfo("Switched to new proxy: %s", pm.currentProxy.String())
+		pm.mu.Unlock()
 	}
 }
 
@@ -94,7 +111,7 @@ func getNewProxyURL() string {
 }
 
 // StartProxyServer starts a proxy server on the given address and forwards requests to the backendURL.
-func StartProxyServer(proxyID, address, backendURL string, queue *Queue, enableDetection bool) {
+func StartProxyServer(proxyID, address, backendURL string, queue *Queue, enableDetection bool, pm *ProxyManager) {
 	parsedURL, err := url.Parse(backendURL)
 	if err != nil {
 		log.Fatalf("Failed to parse backend URL: %v", err)
@@ -145,18 +162,16 @@ func StartProxyServer(proxyID, address, backendURL string, queue *Queue, enableD
 	proxy.ModifyResponse = func(resp *http.Response) error {
 		applyHeaderRules(resp)
 
-		// Vérifiez si la réponse est déjà compressée
 		if strings.Contains(resp.Header.Get("Content-Encoding"), "gzip") {
 			logInfo("Skipping Gzip compression; response already compressed")
 			return nil
 		}
 
-		// Appliquez gzip uniquement si le client le supporte
 		if strings.Contains(resp.Request.Header.Get("Accept-Encoding"), "gzip") {
 			logInfo("Applying Gzip compression from ModifyResponse to response for URL: %s", resp.Request.URL)
 
 			resp.Header.Set("Content-Encoding", "gzip")
-			resp.Header.Del("Content-Length") // Supprimez Content-Length pour éviter les incohérences
+			resp.Header.Del("Content-Length")
 
 			var buf bytes.Buffer
 			gz := gzip.NewWriter(&buf)
@@ -241,7 +256,7 @@ func StartProxyServer(proxyID, address, backendURL string, queue *Queue, enableD
 		r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 
 		if enableDetection {
-			// Appel au service de détection si activé
+
 			detectionData := map[string]interface{}{
 				"uri":  r.RequestURI,
 				"body": string(bodyBytes),
