@@ -21,6 +21,7 @@ import (
 var ctx = context.Background()
 var unsecureCert bool
 var proxyManager *ProxyManager
+var aclConfig *ACLConfig
 
 // Metrics for Prometheus monitoring
 var (
@@ -126,6 +127,7 @@ func main() {
 	proxyPorts := flag.String("proxy-ports", "8081,8082,8083,8084", "Comma-separated list of ports for proxies")
 	BackendURLFlag := flag.String("web-server", "http://127.0.0.1:5000", "Define the backend web server URL")
 	apiFlag := flag.Bool("api", false, "Define the API endpoint")
+	aclFile := flag.String("acl-file", "", "Path to the YAML file defining ACLs")
 	flag.Parse()
 
 	var serverIP string
@@ -153,6 +155,14 @@ func main() {
 		}
 		addTestMessage(queue)
 		go startConsumers(queue)
+	}
+
+	if *aclFile != "" {
+		var err error
+		aclConfig, err = LoadACLConfig(*aclFile)
+		if err != nil {
+			log.Fatalf("Failed to load ACL file: %v", err)
+		}
 	}
 	if *BackendURLFlag != "" {
 		backendURLserver = *BackendURLFlag
@@ -227,6 +237,11 @@ func main() {
 	mux.Handle("/metrics", promhttp.Handler())
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if aclConfig != nil {
+			if handled := HandleRequestWithACL(r, w, aclConfig); handled {
+				return // Requête déjà traitée par les ACL
+			}
+		}
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			if *apiFlag {
 				mux.ServeHTTP(w, r)
@@ -235,6 +250,7 @@ func main() {
 			}
 			return
 		}
+
 		if *enableDetection && suspiciousRating != nil {
 			ip := r.RemoteAddr
 			if suspiciousRating.DetectAttack(r) {

@@ -21,24 +21,7 @@ import (
 // startAutoSwitch switches proxies automatically every 10 seconds
 func (pm *ProxyManager) startAutoSwitch() {
 	for range pm.ticker.C {
-		pm.mu.Lock()
-		if len(pm.proxies) == 0 {
-			logWarning("No proxies available for rotation")
-			pm.currentProxy = nil
-			pm.mu.Unlock()
-			continue
-		}
-
-		index := 0
-		for i, proxy := range pm.proxies {
-			if proxy.String() == pm.currentProxy.String() {
-				index = (i + 1) % len(pm.proxies)
-				break
-			}
-		}
-		pm.currentProxy = pm.proxies[index]
-		logInfo("Switched to new proxy: %s", pm.currentProxy.String())
-		pm.mu.Unlock()
+		pm.switchProxy()
 	}
 }
 
@@ -61,6 +44,8 @@ func (pm *ProxyManager) switchProxy() {
 
 // GetProxy returns the current proxy
 func (pm *ProxyManager) GetProxy() *url.URL {
+	logInfo("Fetching current proxy: %s", pm.currentProxy)
+
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	return pm.currentProxy
@@ -94,6 +79,9 @@ func (pm *ProxyManager) GetActiveProxy() (*url.URL, error) {
 	defer redisClient.Close()
 
 	activeProxyStr, err := redisClient.Get(ctx, "active_proxy").Result()
+	if err != nil {
+		logError("Error fetching active proxy from Redis: %v", err)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -210,6 +198,7 @@ func StartProxyServer(proxyID, address, backendURL string, queue *Queue, enableD
 	currentProxyURL = activeProxy
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+
 		start := time.Now()
 		status := "200"
 
@@ -282,8 +271,13 @@ func StartProxyServer(proxyID, address, backendURL string, queue *Queue, enableD
 				return
 			}
 		}
-
+		if aclConfig != nil {
+			if handled := HandleRequestWithACL(r, w, aclConfig); handled {
+				return // Requête déjà traitée par les ACL
+			}
+		}
 		proxy.ServeHTTP(w, r)
+
 	})
 
 	go func() {

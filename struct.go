@@ -30,3 +30,15 @@ type HeaderRule struct {
 type HeaderRulesConfig struct {
 	HeaderRules []HeaderRule `yaml:"header_rules"`
 }
+
+type ACLRule struct {
+	Name      string      `yaml:"name"`
+	Condition string      `yaml:"condition"`
+	Value     interface{} `yaml:"value"` // Peut être une chaîne ou une carte
+	Action    string      `yaml:"action"`
+	Options   []string    `yaml:"options,omitempty"`
+}
+
+type ACLConfig struct {
+	Rules []ACLRule `yaml:"rules"`
+}
