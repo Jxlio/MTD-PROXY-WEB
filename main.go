@@ -239,7 +239,7 @@ func main() {
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if aclConfig != nil {
 			if handled := HandleRequestWithACL(r, w, aclConfig); handled {
-				return // Requête déjà traitée par les ACL
+				return
 			}
 		}
 		if strings.HasPrefix(r.URL.Path, "/api/") {

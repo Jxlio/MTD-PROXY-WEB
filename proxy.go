@@ -272,8 +272,9 @@ func StartProxyServer(proxyID, address, backendURL string, queue *Queue, enableD
 			}
 		}
 		if aclConfig != nil {
+			logInfo("list rule : %v", aclConfig.Rules)
 			if handled := HandleRequestWithACL(r, w, aclConfig); handled {
-				return // Requête déjà traitée par les ACL
+				return
 			}
 		}
 		proxy.ServeHTTP(w, r)
@@ -300,4 +301,24 @@ func StartProxyServer(proxyID, address, backendURL string, queue *Queue, enableD
 
 	logInfo("Starting HTTPS proxy server %s on %s", proxyID, address)
 	server.ListenAndServeTLS("server.crt", "server.key")
+}
+
+// ReloadProxiesWithACLConfig reloads all proxies with the updated ACL configuration
+func ReloadProxiesWithACLConfig(proxyManager *ProxyManager, aclConfig *ACLConfig) {
+	proxyManager.mu.Lock()
+	defer proxyManager.mu.Unlock()
+
+	for _, proxy := range proxyManager.proxies {
+		logInfo("Reloading ACL config for proxy: %s", proxy.String())
+	}
+	logInfo("All proxies reloaded with updated ACL configuration")
+}
+
+func ApplyACLToProxies(pm *ProxyManager) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	for _, proxy := range pm.proxies {
+		logInfo("Applying ACL rules to proxy: %s", proxy.String())
+	}
 }

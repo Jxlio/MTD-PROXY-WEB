@@ -10,6 +10,7 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
+// getEffectiveClientIP returns the effective client IP address based on the request headers.
 func getEffectiveClientIP(r *http.Request, overrideHeader string) string {
 	if overrideHeader != "" {
 		customIP := r.Header.Get(overrideHeader)
@@ -27,6 +28,7 @@ func getEffectiveClientIP(r *http.Request, overrideHeader string) string {
 	return strings.Split(r.RemoteAddr, ":")[0]
 }
 
+// LoadACLConfig loads the ACL configuration from the given file.
 func LoadACLConfig(filepath string) (*ACLConfig, error) {
 	data, err := os.ReadFile(filepath)
 	if err != nil {
@@ -42,6 +44,7 @@ func LoadACLConfig(filepath string) (*ACLConfig, error) {
 	return &config, nil
 }
 
+// EvaluateACLs evaluates the ACL rules based on the request and returns the action to be taken.
 func EvaluateACLs(req *http.Request, aclConfig *ACLConfig) (string, error) {
 	for _, rule := range aclConfig.Rules {
 		switch rule.Condition {
@@ -66,8 +69,10 @@ func EvaluateACLs(req *http.Request, aclConfig *ACLConfig) (string, error) {
 	return "", nil
 }
 
+// HandleRequestWithACL handles the incoming request based on the ACL configuration.
 func HandleRequestWithACL(r *http.Request, w http.ResponseWriter, aclConfig *ACLConfig) bool {
-	for _, rule := range aclConfig.Rules {
+	rules := aclConfig.GetRules()
+	for _, rule := range rules {
 		matched := false
 
 		switch rule.Condition {
@@ -148,6 +153,7 @@ func HandleRequestWithACL(r *http.Request, w http.ResponseWriter, aclConfig *ACL
 	return false
 }
 
+// ipInRange checks if the given IP address is in the given CIDR range.
 func ipInRange(remoteAddr, ruleValue string) bool {
 	clientIP := strings.Split(remoteAddr, ":")[0]
 	_, ipNet, err := net.ParseCIDR(ruleValue)
@@ -160,4 +166,87 @@ func ipInRange(remoteAddr, ruleValue string) bool {
 		return false
 	}
 	return ipNet.Contains(requestIP)
+}
+
+// AddRule adds a rule to the ACL configuration.
+func (config *ACLConfig) AddRule(rule ACLRule) {
+	config.mu.Lock()
+	defer config.mu.Unlock()
+	config.Rules = append(config.Rules, rule)
+}
+
+// RemoveRule removes a rule from the ACL configuration.
+func (config *ACLConfig) RemoveRule(name string) {
+	config.mu.Lock()
+	defer config.mu.Unlock()
+	for i, rule := range config.Rules {
+		if rule.Name == name {
+			config.Rules = append(config.Rules[:i], config.Rules[i+1:]...)
+			break
+		}
+	}
+}
+
+// UpdateRule updates an existing rule in the ACL configuration.
+func (config *ACLConfig) UpdateRule(updatedRule ACLRule) {
+	config.mu.Lock()
+	defer config.mu.Unlock()
+	for i, rule := range config.Rules {
+		if rule.Name == updatedRule.Name {
+			config.Rules[i] = updatedRule
+			break
+		}
+	}
+}
+
+// GetRules returns the list of rules in the ACL configuration.
+func (config *ACLConfig) GetRules() []ACLRule {
+	config.mu.RLock()
+	defer config.mu.RUnlock()
+	return config.Rules
+}
+
+// ReloadACL compile rules and ensure that the allow all rule is the last rule in the ACL configuration.
+func ReloadACL() {
+	aclMutex.Lock()
+	defer aclMutex.Unlock()
+
+	aclConfig.EnsureAllowAllLast()
+	logInfo("ACL configuration reloaded.")
+}
+
+// AddRuleWithPriority add a rule to the ACL configuration at the given priority.
+func (config *ACLConfig) AddRuleWithPriority(rule ACLRule, priority int) {
+	config.mu.Lock()
+	defer config.mu.Unlock()
+
+	if priority < 0 || priority >= len(config.Rules) {
+		config.Rules = append(config.Rules, rule)
+	} else {
+		config.Rules = append(config.Rules[:priority+1], config.Rules[priority:]...)
+		config.Rules[priority] = rule
+	}
+}
+
+// EnsureAllowAllLast ensure that the allow all rule is the last rule in the ACL configuration.
+func (config *ACLConfig) EnsureAllowAllLast() {
+	config.mu.Lock()
+	defer config.mu.Unlock()
+
+	var allowAllRule *ACLRule
+	var otherRules []ACLRule
+
+	for _, rule := range config.Rules {
+		if rule.Condition == "always" && rule.Action == "allow" {
+			allowAllRule = &rule
+		} else {
+			otherRules = append(otherRules, rule)
+		}
+	}
+
+	if allowAllRule != nil {
+		config.Rules = append(otherRules, *allowAllRule)
+	} else {
+		config.Rules = otherRules
+	}
 }

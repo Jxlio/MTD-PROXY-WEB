@@ -34,11 +34,18 @@ type HeaderRulesConfig struct {
 type ACLRule struct {
 	Name      string      `yaml:"name"`
 	Condition string      `yaml:"condition"`
-	Value     interface{} `yaml:"value"` // Peut être une chaîne ou une carte
+	Value     interface{} `yaml:"value"`
 	Action    string      `yaml:"action"`
 	Options   []string    `yaml:"options,omitempty"`
 }
 
 type ACLConfig struct {
+	mu    sync.RWMutex
 	Rules []ACLRule `yaml:"rules"`
+}
+
+type Proxy struct {
+	ID        string
+	URL       *url.URL
+	ACLConfig *ACLConfig
 }

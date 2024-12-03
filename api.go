@@ -13,6 +13,7 @@ import (
 )
 
 var apiKey string
+var aclMutex sync.RWMutex
 
 var rateLimiters = make(map[string]*rate.Limiter)
 var rlMutex sync.Mutex
@@ -68,15 +69,20 @@ func setupAPIRoutes(mux *http.ServeMux, proxyManager *ProxyManager, randApikey s
 	}
 	apiKey = randApikey
 	apiRouter := http.NewServeMux()
+
 	apiRouter.HandleFunc("/api/proxies", func(w http.ResponseWriter, r *http.Request) {
 		handleProxies(w, r, proxyManager)
 	})
 	apiRouter.HandleFunc("/api/ports", func(w http.ResponseWriter, r *http.Request) {
 		handlePorts(w, r, proxyManager)
 	})
+	if aclConfig != nil {
+		apiRouter.HandleFunc("/api/acl", func(w http.ResponseWriter, r *http.Request) {
+			handleACLs(w, r, proxyManager)
+		})
+	}
 
 	mux.Handle("/api/", rateLimitMiddleware(apiKeyMiddleware(apiRouter)))
-
 }
 
 func logAPIRequest(r *http.Request) {
@@ -203,4 +209,139 @@ func (pm *ProxyManager) UpdatePorts(ports []string) {
 	}
 
 	logInfo("Updated proxy ports: %v", ports)
+}
+
+// handleACLs manages ACL rules.
+func handleACLs(w http.ResponseWriter, r *http.Request, proxyManager *ProxyManager) {
+	logAPIRequest(r)
+	switch r.Method {
+	case http.MethodGet:
+		getACLHandler(w)
+	case http.MethodPost:
+		addACLHandler(w, r, proxyManager)
+	case http.MethodPut:
+		modifyACLHandler(w, r, proxyManager)
+	case http.MethodDelete:
+		deleteACLHandler(w, r, proxyManager)
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// ReloadACLConfig apply ACL rules to all proxies.
+func ReloadACLConfig() {
+	aclMutex.Lock()
+	defer aclMutex.Unlock()
+
+	logInfo("Reloaded global ACL rules.")
+}
+
+// getACLHandler return ACL rules.
+func getACLHandler(w http.ResponseWriter) {
+	aclMutex.RLock()
+	defer aclMutex.RUnlock()
+
+	w.Header().Set("Content-Type", "application/json")
+
+	normalizedRules, err := normalizeACLRules(aclConfig.Rules)
+	if err != nil {
+		logError("Failed to normalize ACL rules: %v", err)
+		http.Error(w, "Failed to process ACL rules", http.StatusInternalServerError)
+		return
+	}
+
+	if err := json.NewEncoder(w).Encode(normalizedRules); err != nil {
+		logError("Failed to encode ACL rules: %v", err)
+		http.Error(w, "Failed to encode ACL rules", http.StatusInternalServerError)
+	}
+}
+
+func addACLHandler(w http.ResponseWriter, r *http.Request, proxyManager *ProxyManager) {
+	var requestData struct {
+		Rule     ACLRule `json:"rule"`
+		Priority int     `json:"priority,omitempty"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&requestData); err != nil {
+		http.Error(w, "Invalid input", http.StatusBadRequest)
+		return
+	}
+
+	priority := requestData.Priority
+	if priority < 0 {
+		priority = 0
+	}
+
+	aclConfig.AddRuleWithPriority(requestData.Rule, priority)
+	ReloadACL()
+	ApplyACLToProxies(proxyManager)
+
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]string{"message": "ACL rule added successfully"})
+}
+
+// modifyACLHandler modify an existing ACL rule.
+func modifyACLHandler(w http.ResponseWriter, r *http.Request, proxyManager *ProxyManager) {
+	ruleName := r.URL.Query().Get("name")
+	if ruleName == "" {
+		http.Error(w, "Missing ACL rule name", http.StatusBadRequest)
+		return
+	}
+
+	var updatedRule ACLRule
+	if err := json.NewDecoder(r.Body).Decode(&updatedRule); err != nil {
+		http.Error(w, "Invalid input", http.StatusBadRequest)
+		return
+	}
+
+	aclConfig.UpdateRule(updatedRule)
+	ReloadProxiesWithACLConfig(proxyManager, aclConfig)
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"message": "ACL rule updated successfully"})
+}
+
+// deleteACLHandler delete an ACL rule.
+func deleteACLHandler(w http.ResponseWriter, r *http.Request, proxyManager *ProxyManager) {
+	ruleName := r.URL.Query().Get("name")
+	if ruleName == "" {
+		http.Error(w, "Missing ACL rule name", http.StatusBadRequest)
+		return
+	}
+
+	aclConfig.RemoveRule(ruleName)
+	ReloadProxiesWithACLConfig(proxyManager, aclConfig)
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"message": "ACL rule deleted successfully"})
+}
+
+func normalizeACLRules(rules []ACLRule) ([]map[string]interface{}, error) {
+	var normalizedRules []map[string]interface{}
+	for _, rule := range rules {
+		normalizedRule := map[string]interface{}{
+			"name":      rule.Name,
+			"condition": rule.Condition,
+			"value":     normalizeValue(rule.Value),
+			"action":    rule.Action,
+			"options":   rule.Options,
+		}
+		normalizedRules = append(normalizedRules, normalizedRule)
+	}
+	return normalizedRules, nil
+}
+
+func normalizeValue(value interface{}) interface{} {
+	switch v := value.(type) {
+	case map[interface{}]interface{}:
+		normalizedMap := make(map[string]interface{})
+		for key, val := range v {
+			normalizedMap[fmt.Sprintf("%v", key)] = val
+		}
+		return normalizedMap
+	case string:
+		return v
+	default:
+		return fmt.Sprintf("%v", v)
+	}
 }
