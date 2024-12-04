@@ -236,7 +236,7 @@ func main() {
 	// Setup Prometheus metrics endpoint
 	mux.Handle("/metrics", promhttp.Handler())
 
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/", SessionMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if aclConfig != nil {
 			if handled := HandleRequestWithACL(r, w, aclConfig); handled {
 				return
@@ -273,7 +273,7 @@ func main() {
 
 		targetURL := proxy.String() + r.URL.RequestURI()
 		http.Redirect(w, r, targetURL, http.StatusTemporaryRedirect)
-	})
+	})))
 
 	server := &http.Server{
 		Addr:         "0.0.0.0:443",

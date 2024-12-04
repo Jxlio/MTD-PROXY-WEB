@@ -62,7 +62,13 @@ func logSuccess(format string, v ...interface{}) {
 
 func logRequest(r *http.Request) {
 	log.SetOutput(requestLogFile)
-	log.Printf("Request: %s %s from %s; %s", r.Method, r.URL.String(), r.RemoteAddr, r.UserAgent())
+	sessionID, _ := r.Context().Value("sessionID").(string)
+	if sessionID == "" {
+		sessionID = "unknown"
+	}
+	log.Printf("Request: %s %s from %s; User-Agent: %s; SessionID: %s",
+		r.Method, r.URL.String(), r.RemoteAddr, r.UserAgent(), sessionID)
+
 	log.SetOutput(logFile)
 }
 

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/tls"
 	"io"
 	"log"
@@ -197,7 +198,7 @@ func StartProxyServer(proxyID, address, backendURL string, queue *Queue, enableD
 	}
 	currentProxyURL = activeProxy
 
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle("/", SessionMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 
 		start := time.Now()
 		status := "200"
@@ -279,7 +280,7 @@ func StartProxyServer(proxyID, address, backendURL string, queue *Queue, enableD
 		}
 		proxy.ServeHTTP(w, r)
 
-	})
+	})))
 
 	go func() {
 		pubsub := redisClient.Subscribe(ctx, "proxy_updates")
@@ -321,4 +322,33 @@ func ApplyACLToProxies(pm *ProxyManager) {
 	for _, proxy := range pm.proxies {
 		logInfo("Applying ACL rules to proxy: %s", proxy.String())
 	}
+}
+
+func SessionMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sessionID, err := GetSessionID(r)
+		clientIP := r.RemoteAddr
+
+		if err != nil || sessionID == "" {
+			sessionID = generateSessionID()
+			token, err := GenerateJWT(sessionID, clientIP)
+			if err != nil {
+				if err.Error() == "rate limit exceeded for IP "+clientIP {
+					http.Error(w, "Too many JWT generations. Try again later.", http.StatusTooManyRequests)
+					return
+				}
+				http.Error(w, "Failed to generate session token", http.StatusInternalServerError)
+				return
+			}
+			SetSessionCookie(w, token)
+		}
+
+		if IsSessionBlacklisted(sessionID) {
+			http.Error(w, "Forbidden: Your session is blacklisted", http.StatusForbidden)
+			return
+		}
+
+		ctx := context.WithValue(r.Context(), "sessionID", sessionID)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
 }

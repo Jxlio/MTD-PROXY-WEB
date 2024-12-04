@@ -81,6 +81,7 @@ func setupAPIRoutes(mux *http.ServeMux, proxyManager *ProxyManager, randApikey s
 			handleACLs(w, r, proxyManager)
 		})
 	}
+	apiRouter.HandleFunc("/api/ban_session", handleBanSession)
 
 	mux.Handle("/api/", rateLimitMiddleware(apiKeyMiddleware(apiRouter)))
 }
@@ -344,4 +345,16 @@ func normalizeValue(value interface{}) interface{} {
 	default:
 		return fmt.Sprintf("%v", v)
 	}
+}
+
+func handleBanSession(w http.ResponseWriter, r *http.Request) {
+	sessionID := r.URL.Query().Get("session_id")
+	if sessionID == "" {
+		http.Error(w, "Missing session_id", http.StatusBadRequest)
+		return
+	}
+
+	BlacklistSession(sessionID)
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"message": "Session blacklisted successfully"})
 }

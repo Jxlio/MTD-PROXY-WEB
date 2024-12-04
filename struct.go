@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dgrijalva/jwt-go"
 	"github.com/go-redis/redis/v8"
 )
 
@@ -48,4 +49,9 @@ type Proxy struct {
 	ID        string
 	URL       *url.URL
 	ACLConfig *ACLConfig
+}
+
+type Claims struct {
+	SessionID string `json:"session_id"`
+	jwt.StandardClaims
 }
