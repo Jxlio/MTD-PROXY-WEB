@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -20,6 +21,8 @@ import (
 
 var ctx = context.Background()
 var unsecureCert bool
+var serverIP string
+var domain string
 var proxyManager *ProxyManager
 var aclConfig *ACLConfig
 
@@ -49,6 +52,16 @@ var proxySwitchesTotal = prometheus.NewCounterVec(
 	[]string{"proxy_id"},
 )
 
+func checkCertificates(certFile, keyFile string) error {
+	if _, err := os.Stat(certFile); os.IsNotExist(err) {
+		return fmt.Errorf("certificate file %s does not exist", certFile)
+	}
+	if _, err := os.Stat(keyFile); os.IsNotExist(err) {
+		return fmt.Errorf("key file %s does not exist", keyFile)
+	}
+	return nil
+}
+
 func init() {
 	prometheus.MustRegister(proxyRequestsTotal, proxyRequestDuration)
 	prometheus.MustRegister(proxySwitchesTotal)
@@ -62,7 +75,9 @@ func generateAPIKey() string {
 	}
 	return hex.EncodeToString(key)
 }
-func NewProxyManager(proxyURLs []string) *ProxyManager {
+
+func NewProxyManager(proxyURLs []string, domain string) *ProxyManager {
+	logInfo("Initializing ProxyManager with domain: %s", domain)
 	proxies := make([]*url.URL, len(proxyURLs))
 	for i, proxyURL := range proxyURLs {
 		url, err := url.Parse(proxyURL)
@@ -76,6 +91,7 @@ func NewProxyManager(proxyURLs []string) *ProxyManager {
 		proxies:      proxies,
 		currentProxy: proxies[0],
 		ticker:       time.NewTicker(10 * time.Second),
+		domain:       domain, // Initialisez le champ
 	}
 
 	go pm.startAutoSwitch()
@@ -128,17 +144,34 @@ func main() {
 	BackendURLFlag := flag.String("web-server", "http://127.0.0.1:5000", "Define the backend web server URL")
 	apiFlag := flag.Bool("api", false, "Define the API endpoint")
 	aclFile := flag.String("acl-file", "", "Path to the YAML file defining ACLs")
+	domain := flag.String("d", "", "Domain name to use for the proxy (e.g., jxlio.fr)")
+	certFile := flag.String("crt", "", "Path to the SSL certificate file")
+	keyFile := flag.String("key", "", "Path to the SSL key file")
 	flag.Parse()
 
 	var serverIP string
 	configureLogger(*verbose)
 
+	if err := checkCertificates("server.crt", "server.key"); err != nil {
+		log.Fatalf("Certificate check failed: %v", err)
+	}
+
 	if *ServerIPArg != "" {
-		logInfo("IP address %s has been manually set", *ServerIPArg)
-		serverIP = *ServerIPArg
+		if *domain != "" {
+			serverIP = *domain
+			logInfo("Using %s as the host", serverIP)
+		} else {
+			logInfo("IP address %s has been manually set", *ServerIPArg)
+			serverIP = *ServerIPArg
+		}
 	} else {
-		serverIP = getServerIPAddress()
-		logWarning("No IP address specified. Using %s as the server IP address", serverIP)
+		if *domain != "" {
+			serverIP = *domain
+			logInfo("Using %s as the host", serverIP)
+		} else {
+			serverIP = getServerIPAddress()
+			logWarning("No IP address specified. Using %s as the server IP address", serverIP)
+		}
 	}
 
 	if *headerRulesFile != "" {
@@ -181,6 +214,10 @@ func main() {
 		logWarning("Insufficient ports provided. Using default ports.")
 		portList = []string{"8081", "8082", "8083", "8084"}
 	}
+
+	if *domain == "" || *certFile == "" || *keyFile == "" {
+		logWarning("Domain (-d), certificate (-crt), and key (-key) are required to setup custom domain, using local certificate instead")
+	}
 	// Proxy configurations
 	proxyConfigs := []struct {
 		id         string
@@ -201,10 +238,17 @@ func main() {
 	}
 
 	proxyURLs := []string{}
-	for _, config := range proxyConfigs {
-		proxyURLs = append(proxyURLs, "https://"+serverIP+config.address)
+	if *domain != "" {
+		for _, config := range proxyConfigs {
+			proxyURLs = append(proxyURLs, "https://"+serverIP+config.address)
+		}
+	} else {
+		for _, config := range proxyConfigs {
+			proxyURLs = append(proxyURLs, "https://"+*domain+config.address)
+		}
 	}
-	proxyManager := NewProxyManager(proxyURLs)
+	proxyManager := NewProxyManager(proxyURLs, *domain)
+
 	mux := http.NewServeMux()
 	if *apiFlag {
 		logInfo("API endpoint enabled")
@@ -285,9 +329,18 @@ func main() {
 			MinVersion: tls.VersionTLS12,
 		},
 	}
-
-	logInfo("Starting HTTP to HTTPS redirect server")
-	server.ListenAndServeTLS("server.crt", "server.key")
+	if *domain != "" {
+		logInfo("Starting HTTPS server with custom domain %s", *domain)
+		if err := server.ListenAndServeTLS(*certFile, *keyFile); err != nil {
+			log.Fatalf("Failed to start HTTPS server: %v", err)
+		}
+	} else {
+		logInfo("Starting HTTP to HTTPS redirect server")
+		logInfo("Attempting to start HTTPS server with TLS configuration")
+		if err := server.ListenAndServeTLS("server.crt", "server.key"); err != nil {
+			log.Fatalf("Failed to start HTTPS server: %v", err)
+		}
+	}
 }
 
 func startConsumers(queue *Queue) {

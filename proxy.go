@@ -59,14 +59,28 @@ func (pm *ProxyManager) UpdateActiveProxy(currentProxy *url.URL) {
 	})
 	defer redisClient.Close()
 
-	err := redisClient.Set(ctx, "active_proxy", currentProxy.String(), 0).Err()
+	// Conserver l'URL actuelle
+	activeProxyURL := currentProxy.String()
+
+	// Remplacer l'IP par le domaine si un domaine est défini
+	if pm.domain != "" {
+		parsedURL, err := url.Parse(activeProxyURL)
+		if err == nil {
+			parsedURL.Host = pm.domain + ":" + strings.Split(parsedURL.Host, ":")[1] // Conserve le port
+			activeProxyURL = parsedURL.String()
+		}
+	}
+
+	// Mettre à jour Redis
+	err := redisClient.Set(ctx, "active_proxy", activeProxyURL, 0).Err()
 	if err != nil {
 		logError("Failed to update active proxy in Redis: %v", err)
 	} else {
-		logSuccess("Successfully updated active proxy to %s in Redis", currentProxy.String())
+		logSuccess("Successfully updated active proxy to %s in Redis", activeProxyURL)
 	}
 
-	err = redisClient.Publish(ctx, "proxy_updates", currentProxy.String()).Err()
+	// Publier la mise à jour
+	err = redisClient.Publish(ctx, "proxy_updates", activeProxyURL).Err()
 	if err != nil {
 		logError("Failed to publish proxy update: %v", err)
 	}
@@ -82,17 +96,20 @@ func (pm *ProxyManager) GetActiveProxy() (*url.URL, error) {
 	activeProxyStr, err := redisClient.Get(ctx, "active_proxy").Result()
 	if err != nil {
 		logError("Error fetching active proxy from Redis: %v", err)
+		return nil, err
 	}
+
+	parsedURL, err := url.Parse(activeProxyStr)
 	if err != nil {
 		return nil, err
 	}
 
-	activeProxy, err := url.Parse(activeProxyStr)
-	if err != nil {
-		return nil, err
+	// Remplacer l'IP par le domaine si nécessaire
+	if pm.domain != "" {
+		parsedURL.Host = pm.domain + ":" + strings.Split(parsedURL.Host, ":")[1]
 	}
 
-	return activeProxy, nil
+	return parsedURL, nil
 }
 
 func getNewProxyURL() string {
@@ -231,10 +248,16 @@ func StartProxyServer(proxyID, address, backendURL string, queue *Queue, enableD
 			return
 		}
 
-		if "https://"+r.Host != activeProxy {
+		if pm.domain != "" && !strings.HasPrefix(activeProxy, "https://"+pm.domain) {
 			status = "302"
-			http.Redirect(w, r, activeProxy+r.RequestURI, http.StatusFound)
+			http.Redirect(w, r, "https://"+pm.domain+r.RequestURI, http.StatusFound)
 			return
+		} else {
+			if "https://"+r.Host != activeProxy {
+				status = "302"
+				http.Redirect(w, r, activeProxy+r.RequestURI, http.StatusFound)
+				return
+			}
 		}
 
 		bodyBytes, err := io.ReadAll(r.Body)

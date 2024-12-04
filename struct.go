@@ -11,9 +11,10 @@ import (
 
 type ProxyManager struct {
 	proxies      []*url.URL
-	mu           sync.Mutex
 	currentProxy *url.URL
 	ticker       *time.Ticker
+	mu           sync.Mutex
+	domain       string
 }
 
 type SuspiciousRating struct {
