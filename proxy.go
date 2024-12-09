@@ -281,7 +281,8 @@ func StartProxyServer(proxyID, address, backendURL string, queue *Queue, enableD
 				return
 			}
 
-			if detectionResponse["authorized"] == "MALICIOUS" {
+			// Vérifier si la réponse contient "MALICIOUS" ou "SAFE"
+			if strings.Contains(detectionResponse, "MALICIOUS") {
 				status = "403"
 				htmlContent, err := os.ReadFile("403.html")
 				if err != nil {
@@ -294,6 +295,13 @@ func StartProxyServer(proxyID, address, backendURL string, queue *Queue, enableD
 				w.Write(htmlContent)
 				return
 			}
+
+			// Continuer normalement si la réponse contient "SAFE"
+			if strings.Contains(detectionResponse, "SAFE") {
+				status = "200"
+				// Ajoutez ici la logique pour poursuivre le traitement si besoin.
+			}
+
 		}
 		if aclConfig != nil {
 			logInfo("list rule : %v", aclConfig.Rules)

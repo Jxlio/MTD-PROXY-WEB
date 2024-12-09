@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
-	"net"
+	"fmt"
+	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-redis/redis/v8"
@@ -59,42 +62,89 @@ func (sr *SuspiciousRating) decayRatings() {
 
 // DetectAttack detects whether the incoming request is suspicious
 func (sr *SuspiciousRating) DetectAttack(r *http.Request) bool {
-	// Example detection logic
-	if r.Method != http.MethodGet && r.Method != http.MethodPost {
-		return true
+	// Convertir les données de la requête en une map
+	data := map[string]interface{}{
+		"method":  r.Method,
+		"url":     r.URL.String(),
+		"headers": r.Header,
+		"body":    extractRequestBody(r),
 	}
-	// Add more detection logic here if needed
-	return false
+
+	// Envoyer les données au service Flask
+	response, err := sendToDetectionService(data)
+	if err != nil {
+		logError("Error contacting detection service: %v", err)
+		return true // Considérer la requête comme malveillante en cas d'erreur
+	}
+
+	// Nettoyer la réponse pour éviter des espaces ou des caractères inattendus
+	response = strings.TrimSpace(response)
+
+	// Vérifier le verdict (texte brut)
+	switch response {
+	case "MALICIOUS":
+		return true
+	case "SAFE":
+		return false
+	default:
+		// Si la réponse est inattendue, consigner l'erreur
+		logError("Unexpected response from detection service: %s", response)
+		return true // Considérer la requête comme malveillante par précaution
+	}
 }
 
-func sendToDetectionService(data map[string]interface{}) (map[string]string, error) {
+// extractRequestBody extrait le corps de la requête HTTP
+func extractRequestBody(r *http.Request) string {
+	if r.Body == nil {
+		return ""
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		logError("Error reading request body: %v", err)
+		return ""
+	}
+	return string(body)
+}
+
+func sendToDetectionService(data map[string]interface{}) (string, error) {
+	// Convertir les données en JSON
 	jsonData, err := json.Marshal(data)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 
-	conn, err := net.Dial("tcp", "localhost:3000")
+	// Créer une nouvelle requête HTTP
+	url := "http://localhost:3000" // URL du service Flask
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewBuffer(jsonData))
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	defer conn.Close()
 
-	_, err = conn.Write([]byte(jsonData))
+	// Ajouter le header Content-Type
+	req.Header.Set("Content-Type", "application/json")
+
+	// Envoyer la requête
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
+	defer resp.Body.Close()
 
-	buffer := make([]byte, 1024)
-	n, err := conn.Read(buffer)
+	// Lire la réponse en tant que texte brut
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 
-	var response map[string]string
-	err = json.Unmarshal(buffer[:n], &response)
-	if err != nil {
-		return nil, err
+	// Journaliser la réponse brute pour débogage
+	logInfo("Detection service raw response: %s", string(body))
+
+	// Vérifier le statut HTTP
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("detection service returned status: %d, response: %s", resp.StatusCode, string(body))
 	}
 
-	return response, nil
+	// Retourner la réponse brute
+	return string(body), nil
 }
