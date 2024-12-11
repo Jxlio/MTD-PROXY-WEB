@@ -41,6 +41,7 @@ func configureLogger(verbose bool) {
 	if err != nil {
 		log.Fatalf("Failed to open request log file: %v", err)
 	}
+
 }
 
 func logInfo(format string, v ...interface{}) {
@@ -66,7 +67,7 @@ func logRequest(r *http.Request) {
 	if sessionID == "" {
 		sessionID = "unknown"
 	}
-	log.Printf("Request: %s %s from %s; User-Agent: %s; SessionID: %s",
+	log.Printf("Request: %s %s from %s; User-Agent: %s; SessionID: %s;",
 		r.Method, r.URL.String(), r.RemoteAddr, r.UserAgent(), sessionID)
 
 	log.SetOutput(logFile)

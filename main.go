@@ -238,15 +238,11 @@ func main() {
 	}
 
 	proxyURLs := []string{}
-	if *domain != "" {
-		for _, config := range proxyConfigs {
-			proxyURLs = append(proxyURLs, "https://"+serverIP+config.address)
-		}
-	} else {
-		for _, config := range proxyConfigs {
-			proxyURLs = append(proxyURLs, "https://"+*domain+config.address)
-		}
+
+	for _, config := range proxyConfigs {
+		proxyURLs = append(proxyURLs, "https://"+serverIP+config.address)
 	}
+
 	proxyManager := NewProxyManager(proxyURLs, *domain)
 
 	mux := http.NewServeMux()
